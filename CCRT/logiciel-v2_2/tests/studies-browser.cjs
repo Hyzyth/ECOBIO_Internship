@@ -63,6 +63,7 @@ for i in range(3):
     await page.mouse.click(box.x + x * box.width, box.y + y * box.height);
   await page.mouse.dblclick(box.x + 0.2 * box.width, box.y + 0.8 * box.height);
   await page.waitForFunction(() => project.wells.length === 1);
+  await page.locator("#occupancy").selectOption("single");
   await page.locator("#nextBoundary").click();
   await page.waitForFunction(() => index === 1 && image !== null);
   await page.locator("#nextLabel").click();
@@ -101,6 +102,13 @@ for i in range(3):
     await frame(i);
     await page.locator("#confirmFrame").click();
   }
+  await page.locator("#recoveryDelay").fill("5");
+  await page.locator("#recoveryDelay").press("Tab");
+  assert.equal(
+    await page.evaluate(() => project.time_origin.offset_seconds),
+    5,
+  );
+  await download("machine", "ccrt-machine.zip");
   await download("training", "ccrt-training.zip");
   await download("report", "ccrt-report.zip");
   await download("json", "ccrt-project.json");
@@ -169,6 +177,8 @@ for i in range(3):
   await page.waitForFunction(
     () => image !== null && project.wells.length === 2,
   );
+  assert.equal(await page.locator("#geometryControls").isVisible(), false);
+  await page.locator("#eggScope").selectOption("areas");
   await page.locator("#tool").selectOption("region");
   await page.locator("#canvas").scrollIntoViewIfNeeded();
   const eggbox = await page.locator("#canvas").boundingBox();
@@ -242,9 +252,11 @@ for task,name,expected,eligible in [('ccrt','ccrt',3,2),('eggs','egg',2,2)]:
   dest=p/f'{name}-dataset';z.extractall(dest)
   spec=importlib.util.spec_from_file_location('dataset',dest/'dataset.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);rows=list(module.samples(dest));assert len(rows)==eligible;assert all(r['image'].mode=='RGB' for r in rows)
  with zipfile.ZipFile(p/f'{name}-report.zip') as z:
-  assert z.testzip() is None;r=json.loads(z.read('report.json'));assert r['kind']==f'{task}-results';assert 'well_boundary' not in r['results'][0];assert 'maps/frame-000001.png' in z.namelist()
-  if task=='ccrt':assert 'egg_count' not in r['results'][0]
-  else:assert 'state' not in r['results'][0];assert [s['total_counted_eggs'] for s in r['summary']]==[0,12]
+  assert z.testzip() is None;r=json.loads(z.read('report.json'));assert r['kind']==f'{task}-human-report';assert 'well_boundary' not in r['results'][0];assert 'report.html' in z.namelist()
+  if task=='ccrt':assert 'egg_count' not in r['results'][0];assert len(r['results'])==1;assert 'maps/frame-000001.png' in z.namelist()
+  else:assert 'state' not in r['results'][0];assert [s['Egg count'] for s in r['results']]==[0,12]
+with zipfile.ZipFile(p/'ccrt-machine.zip') as z:
+ m=json.loads(z.read('machine.json'));assert m['kind']=='ccrt-machine-report';assert m['time_origin']['offset_seconds']==5;assert len(m['results'])==3;assert m['recovery'][0]['ccrt_seconds'] is None;assert m['recovery'][0]['recovery_upper_seconds']==7;assert 'frames.csv' in z.namelist();assert 'project.json' in z.namelist()
 print('ZIP integrity, original image hashes, per-frame polygon crops, masks, manual targets, eligibility, Python loader and task-specific reports passed.')
 `,
     ],

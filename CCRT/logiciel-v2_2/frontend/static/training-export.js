@@ -113,7 +113,9 @@
       canvas.height = Math.round(image.height * scale);
       const ctx = canvas.getContext("2d");
       ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-      for (const well of project.wells) {
+      for (const well of project.wells.filter((w) =>
+        ReviewCore.activeWell(w, frame),
+      )) {
         const points = ReviewCore.geometry(well, frame);
         ctx.beginPath();
         points.forEach((p, i) =>
@@ -235,7 +237,21 @@
       split_group: project.experiment_id,
       created_at: new Date().toISOString(),
       classes: task === "ccrt" ? { coma: 0, awake: 1 } : null,
-      target: task === "ccrt" ? "state_classification" : "region_egg_count",
+      target:
+        task === "ccrt"
+          ? "state_classification"
+          : annotations.every((a) => a.annotation_unit === "image")
+            ? "image_egg_count"
+            : "region_egg_count",
+      expected_individuals_per_well: task === "ccrt" ? 1 : null,
+      time_origin:
+        task === "ccrt"
+          ? project.time_origin || { confirmed: true, offset_seconds: 0 }
+          : null,
+      annotation_format:
+        task === "eggs"
+          ? "Provisional integer count; independent image or optional region"
+          : "Per-frame well state",
       images,
       annotations,
       all_frame_count: project.frames.length,
@@ -244,9 +260,9 @@
         .length,
       notes: [
         "Targets come exclusively from manual annotations. Unannotated frame/wells are omitted.",
-        "Uncertain, partial, unreviewed, and CCRT empty/multiple/obscured regions are retained with eligibility=false.",
+        "Uncertain, partial, unreviewed, and CCRT empty/multiple/obscured/unconfirmed occupancy regions are retained with eligibility=false.",
         "Split related experiments together. Do not randomly split adjacent frames or wells from the same experiment.",
-        "Egg targets are region counts, not egg bounding boxes or segmentation masks.",
+        "Egg targets are provisional independent-image or optional region counts; no well layout is assumed.",
       ],
     };
     const response = await fetch("/static/dataset-loader.py");
