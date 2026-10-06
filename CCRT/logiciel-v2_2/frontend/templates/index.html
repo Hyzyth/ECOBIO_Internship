@@ -71,7 +71,25 @@
             <option value="grid">Full grid / multiple wells</option>
             <option value="individual">Single well / individual</option>
           </select></label
-        ><button id="detect">Suggest well boundaries</button
+        ><label
+          >Detection method<select id="detectionMethod">
+            <option value="auto">Automatic (repeated rings / contours)</option>
+            <option value="grid">Repeated circular wells</option>
+            <option value="contours">Non-circular contours</option>
+          </select></label
+        ><label
+          >Approximate well diameter (original-image pixels)<input
+            id="diameter"
+            type="number"
+            min="1"
+            placeholder="Automatic"
+        /></label>
+        <p class="hint">
+          For circular grids, size and spacing filters reduce fixation
+          proposals. Set diameter when automatic size estimation is wrong.
+          Non-circular mode proposes convex boundaries for review.
+        </p>
+        <button id="detect">Suggest well boundaries</button
         ><button id="align" class="secondary">
           Align current frame to first</button
         ><button id="whole" class="secondary">Use full image as one well</button
@@ -81,6 +99,7 @@
             <option value="polygon">
               Draw polygon (double-click to finish)
             </option>
+            <option value="remove">Remove well (click inside)</option>
             <option value="vertex">Edit boundary vertices</option>
           </select></label
         ><label
@@ -125,9 +144,24 @@
               <i class="unknown"></i> Unknown</span
             >
           </div>
+          <div class="proposal-tools">
+            <label
+              >Detected / drawn wells<select id="proposalSelect">
+                <option value="">Select a well</option>
+              </select></label
+            >
+            <button id="removeSelected" class="danger" disabled>
+              Remove selected well
+            </button>
+            <span class="hint"
+              >Choose a well here or click its boundary. Delete / Backspace also
+              removes the selected well.</span
+            >
+          </div>
           <div class="canvas-wrap">
             <canvas
               id="canvas"
+              tabindex="0"
               width="1000"
               height="650"
               aria-label="Image and editable well boundaries"

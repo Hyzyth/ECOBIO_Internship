@@ -28,6 +28,58 @@
             : 0) || filename(a, b),
     );
   }
+  function isSimplePolygon(points) {
+    if (
+      !Array.isArray(points) ||
+      points.length < 3 ||
+      !points.every(
+        (p) =>
+          Array.isArray(p) &&
+          p.length === 2 &&
+          p.every((v) => Number.isFinite(v) && v >= 0 && v <= 1),
+      )
+    )
+      return false;
+    const eps = 1e-10;
+    const cross = (a, b, c) =>
+      (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    const on = (a, b, p) =>
+      Math.abs(cross(a, b, p)) <= eps &&
+      p[0] >= Math.min(a[0], b[0]) - eps &&
+      p[0] <= Math.max(a[0], b[0]) + eps &&
+      p[1] >= Math.min(a[1], b[1]) - eps &&
+      p[1] <= Math.max(a[1], b[1]) + eps;
+    const opposite = (a, b) => (a > eps && b < -eps) || (b > eps && a < -eps);
+    const intersects = (a, b, c, d) =>
+      (opposite(cross(a, b, c), cross(a, b, d)) &&
+        opposite(cross(c, d, a), cross(c, d, b))) ||
+      on(a, b, c) ||
+      on(a, b, d) ||
+      on(c, d, a) ||
+      on(c, d, b);
+    let area = 0;
+    for (let i = 0; i < points.length; i++) {
+      const a = points[i],
+        b = points[(i + 1) % points.length],
+        previous = points[(i + points.length - 1) % points.length];
+      if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= eps) return false;
+      // Collinear forward edges are fine; retracing an adjacent edge is not.
+      if (
+        Math.abs(cross(previous, a, b)) <= eps &&
+        (previous[0] - a[0]) * (b[0] - a[0]) +
+          (previous[1] - a[1]) * (b[1] - a[1]) >
+          eps
+      )
+        return false;
+      area += a[0] * b[1] - b[0] * a[1];
+      for (let j = i + 1; j < points.length; j++) {
+        if (j === i + 1 || (i === 0 && j === points.length - 1)) continue;
+        if (intersects(a, b, points[j], points[(j + 1) % points.length]))
+          return false;
+      }
+    }
+    return Math.abs(area) > eps;
+  }
   function geometry(well, frame) {
     return well.overrides?.[frame] || well.points;
   }
@@ -168,15 +220,7 @@
       );
     const ids = new Set(),
       names = new Set();
-    const validPoints = (points) =>
-      Array.isArray(points) &&
-      points.length >= 3 &&
-      points.every(
-        (pt) =>
-          Array.isArray(pt) &&
-          pt.length === 2 &&
-          pt.every((v) => Number.isFinite(v) && v >= 0 && v <= 1),
-      );
+    const validPoints = isSimplePolygon;
     p.wells.forEach((w) => {
       if (
         typeof w.uid !== "string" ||
@@ -232,6 +276,7 @@
     timestamp,
     orderFiles,
     geometry,
+    isSimplePolygon,
     effective,
     key,
     summary,

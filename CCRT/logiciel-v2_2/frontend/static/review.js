@@ -210,16 +210,19 @@ async function previews() {
 function updateDetails() {
   const w = selectedWell(),
     r = record();
-  $("wellSelect").replaceChildren(
-    new Option("Select a well", ""),
-    ...project.wells.map((w) => new Option(w.id, w.uid)),
-  );
-  $("wellSelect").value = selected || "";
+  for (const id of ["wellSelect", "proposalSelect"]) {
+    $(id).replaceChildren(
+      new Option("Select a well", ""),
+      ...project.wells.map((w) => new Option(w.id, w.uid)),
+    );
+    $(id).value = selected || "";
+  }
   [
     "wellName",
     "occupancy",
     "confirm",
     "delete",
+    "removeSelected",
     "correction",
     "eggCount",
     "notes",
@@ -285,6 +288,10 @@ function addWell(
   points,
   detection = { source: "manual", review_required: false, confidence: null },
 ) {
+  if (!C.isSimplePolygon(points))
+    throw Error(
+      "Boundary must be a simple polygon with nonzero area; edges cannot cross or retrace.",
+    );
   const uid = crypto.randomUUID();
   let n = 1;
   while (project.wells.some((w) => w.id === `W${n}`)) n++;
@@ -390,6 +397,9 @@ function setBusy(value) {
     "order",
     "layout",
     "detect",
+    "detectionMethod",
+    "diameter",
+    "proposalSelect",
     "align",
     "whole",
     "tool",
@@ -425,10 +435,12 @@ async function detect() {
   try {
     const form = new FormData();
     form.append("image", files[index]);
+    form.append("method", $("detectionMethod").value);
+    form.append("diameter", $("diameter").value);
     const data = await post("/api/detect", form);
     if (!data.wells.length) {
       status(
-        "No reliable contours found. Existing wells are preserved; draw polygons manually.",
+        "No matching wells found. Existing wells are preserved. Try a diameter override, another detection method, or draw boundaries manually.",
       );
       return;
     }
@@ -439,6 +451,7 @@ async function detect() {
       addWell(w.points, {
         source: w.source,
         confidence: w.confidence,
+        ring_coverage: w.ring_coverage ?? null,
         review_required: true,
       }),
     );
@@ -497,11 +510,7 @@ canvas.addEventListener("pointerdown", (e) => {
   stop();
   const p = position(e),
     tool = $("tool").value;
-  if (tool === "polygon") {
-    if (e.detail < 2) draft.push(p);
-    draw();
-    return;
-  }
+  if (tool === "polygon") return;
   if (tool === "vertex" && selectedWell()) {
     const w = selectedWell(),
       points = C.geometry(w, index).map((p) => [...p]);
@@ -524,6 +533,10 @@ canvas.addEventListener("pointerdown", (e) => {
       return ctx.isPointInPath(p[0] * canvas.width, p[1] * canvas.height);
     });
     select(w?.uid || null);
+    if (tool === "remove") {
+      if (w) removeSelectedWell();
+      return;
+    }
     if (w)
       drag = {
         well: w,
@@ -553,6 +566,12 @@ canvas.addEventListener("pointermove", (e) => {
       );
     points = drag.points.map((pt) => [pt[0] + dx, pt[1] + dy]);
   }
+  if (!C.isSimplePolygon(points)) {
+    status(
+      "Boundary edges cannot cross or retrace. Move the vertex to a valid position.",
+    );
+    return;
+  }
   drag.pending = points;
   const w = drag.well;
   if ($("scope").value === "frame") w.overrides[index] = points;
@@ -566,6 +585,21 @@ function endDrag() {
 }
 canvas.addEventListener("pointerup", endDrag);
 canvas.addEventListener("pointercancel", endDrag);
+canvas.addEventListener("click", (e) => {
+  if (!image || busy || $("tool").value !== "polygon" || e.detail !== 1) return;
+  const p = position(e);
+  const same = (q) =>
+    q &&
+    Math.hypot(
+      (q[0] - p[0]) * canvas.clientWidth,
+      (q[1] - p[1]) * canvas.clientHeight,
+    ) < 1;
+  // Click events carry click counts; pointerdown does not. Do not append the
+  // second half of a double-click or a repeated closing vertex.
+  if (!same(draft.at(-1)) && !(draft.length >= 3 && same(draft[0])))
+    draft.push(p);
+  draw();
+});
 canvas.addEventListener("dblclick", () => {
   if (busy || $("tool").value !== "polygon" || draft.length < 3) return;
   const xs = draft.map((p) => p[0]),
@@ -575,6 +609,10 @@ canvas.addEventListener("dblclick", () => {
     Math.max(...ys) - Math.min(...ys) < 0.002
   )
     return status("Draw a boundary with a nonzero area.");
+  if (!C.isSimplePolygon(draft))
+    return status(
+      "Boundary edges cannot cross or retrace. Press Escape to cancel and draw around the perimeter in order.",
+    );
   addWell(draft.map((p) => [...p]));
   draft = [];
   draw();
@@ -585,6 +623,10 @@ document.addEventListener("keydown", (e) => {
     draw();
   }
   if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
+  if ((e.key === "Delete" || e.key === "Backspace") && selected && !busy) {
+    e.preventDefault();
+    removeSelectedWell();
+  }
   if (e.key === "ArrowRight") moveTo(index + 1);
   if (e.key === "ArrowLeft") moveTo(index - 1);
 });
@@ -736,7 +778,7 @@ $("confirm").onclick = () => {
     draw();
   }
 };
-$("delete").onclick = () => {
+function removeSelectedWell() {
   const w = selectedWell();
   if (!w || !confirm(`Delete ${w.id} and its annotations?`)) return;
   history("delete-well", {
@@ -750,7 +792,13 @@ $("delete").onclick = () => {
     if (k.endsWith(":" + w.uid)) delete project.records[k];
   });
   select(null);
-};
+  status(
+    `${w.id} removed from all frames. Other well identities and annotations are preserved.`,
+  );
+}
+$("delete").onclick = removeSelectedWell;
+$("removeSelected").onclick = removeSelectedWell;
+$("proposalSelect").onchange = (e) => select(e.target.value);
 $("saveCorrection").onclick = () => {
   if (!selected) return;
   const value = $("eggCount").value,

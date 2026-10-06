@@ -107,3 +107,51 @@ test("timestamp ordering is independent of camera filename prefix", () => {
   ];
   assert.equal(C.orderFiles(files)[0].name, files[1].name);
 });
+
+test("simple polygon validation rejects crossings, retracing, duplicate vertices and zero area", () => {
+  for (const points of [
+    [
+      [0, 0],
+      [1, 1],
+      [0, 1],
+      [1, 0],
+    ],
+    [
+      [0, 0],
+      [1, 0],
+      [0.5, 0],
+      [1, 1],
+      [0, 1],
+    ],
+    [
+      [0, 0],
+      [1, 0],
+      [1, 0],
+      [0, 1],
+    ],
+    [
+      [0, 0],
+      [0.5, 0.5],
+      [1, 1],
+    ],
+  ])
+    assert.equal(C.isSimplePolygon(points), false);
+  assert.equal(
+    C.isSimplePolygon([
+      [0, 0],
+      [1, 0],
+      [0.5, 0.5],
+      [1, 1],
+      [0, 1],
+    ]),
+    true,
+  );
+  const p = project();
+  p.wells[0].overrides[1] = [
+    [0, 0],
+    [1, 1],
+    [0, 1],
+    [1, 0],
+  ];
+  assert.throws(() => C.validateProject(p, p.frames));
+});
