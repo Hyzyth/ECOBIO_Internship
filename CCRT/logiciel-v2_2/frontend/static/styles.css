@@ -394,3 +394,6 @@ body[data-study="ccrt"] [data-eggs],
 body[data-study="eggs"] [data-ccrt] {
   display: none !important;
 }
+.empty {
+  background: #ffd447;
+}

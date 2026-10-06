@@ -28,7 +28,7 @@ class AppTests(unittest.TestCase):
         self.assertIn(b'data-study="ccrt"',ccrt.data)
         self.assertIn(b'data-study="eggs"',eggs.data)
         self.assertIn(b'value="batch"',eggs.data)
-        self.assertNotIn(b'value="sequence"',eggs.data)
+        self.assertNotIn(b'value="sequence"',eggs.data.split(b'<select id="mode">')[1].split(b'</select>')[0])
         self.assertIn(b'Export egg training dataset ZIP',eggs.data)
 
     def test_non_circular_detection(self):

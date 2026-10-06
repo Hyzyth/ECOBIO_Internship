@@ -1,7 +1,12 @@
 "use strict";
 const C = ReviewCore,
   $ = (id) => document.getElementById(id),
-  colors = { coma: "#ff304f", awake: "#00ec57", unknown: "#9cacc1" },
+  colors = {
+    coma: "#ff304f",
+    awake: "#00ec57",
+    unknown: "#9cacc1",
+    empty: "#ffd447",
+  },
   study = document.body.dataset.study || "ccrt";
 let lastLabelOperation = null;
 let project = {
@@ -68,7 +73,10 @@ function draw() {
   }
   visibleWells().forEach((w) => {
     const pts = C.geometry(w, index),
-      state = C.effective(project.records[C.key(index, w.uid)]);
+      state = C.effective(
+        project.records[C.key(index, w.uid)],
+        study === "ccrt" ? w : null,
+      );
     pointsPath(ctx, pts, canvas.width, canvas.height);
     ctx.strokeStyle = "#07141c";
     ctx.lineWidth = w.uid === selected ? 8 : 6;
@@ -91,7 +99,14 @@ function draw() {
     ctx.fillText(
       w.id +
         (study === "ccrt"
-          ? " " + (state === "coma" ? "C" : state === "awake" ? "A" : "?")
+          ? " " +
+            (state === "coma"
+              ? "C"
+              : state === "awake"
+                ? "A"
+                : state === "empty"
+                  ? "E"
+                  : "?")
           : ""),
       x + 7,
       y - 6,
@@ -280,8 +295,22 @@ function updateDetails() {
     "nextLabel",
   ].forEach((id) => ($(id).disabled = !w || busy));
   $("wellName").value = w?.id || "";
+  if (study === "ccrt" && w?.occupancy === "empty")
+    for (const id of [
+      "correction",
+      "labelComa",
+      "labelAwake",
+      "labelUncertain",
+      "comaUntil",
+      "awakeFrom",
+      "applyRange",
+    ])
+      $(id).disabled = true;
   $("occupancy").value = w?.occupancy || "unknown";
-  $("correction").value = r.correction?.state || "";
+  $("correction").value =
+    study === "ccrt" && w?.occupancy === "empty"
+      ? "empty"
+      : r.correction?.state || "";
   $("eggCount").value = r.correction?.egg_count ?? "";
   $("notes").value = r.correction?.notes || "";
   $("wellProgress").textContent = w
@@ -290,7 +319,7 @@ function updateDetails() {
   $("undoLabels").disabled = busy || !lastLabelOperation;
   $("rangeStart").max = $("rangeEnd").max = project.frames.length || 1;
   $("prediction").textContent = w
-    ? `${w.id} · ${study === "ccrt" ? (r.correction?.state === "unknown" ? "UNCERTAIN" : C.effective(r).toUpperCase()) : "EGG COUNT"} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
+    ? `${w.id} · ${study === "ccrt" ? (w.occupancy === "empty" ? "EMPTY" : r.correction?.state === "unknown" ? "UNCERTAIN" : C.effective(r, study === "ccrt" ? w : null).toUpperCase()) : "EGG COUNT"} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
   renderSummary();
   updateContext();
@@ -329,7 +358,7 @@ function renderSummary() {
       project.mode === "sequence"
         ? `${s.coma_frames} frames / ${s.coma_seconds.toFixed(2)} s`
         : s.coma_frames,
-      s.unknown_frames,
+      `${s.unknown_frames} uncertain / unlabeled · ${s.empty_frames} empty`,
       s.transitions ?? "—",
       s.average_model_confidence == null
         ? "—"
@@ -487,6 +516,9 @@ function setBusy(value) {
     "alignSequence",
     "clearRegion",
     "confirmFrame",
+    "confirmSequence",
+    "importReportButton",
+    "boundaryApproval",
     "whole",
     "tool",
     "scope",
@@ -911,11 +943,18 @@ $("occupancy").onchange = () => {
   if (w) {
     w.occupancy = $("occupancy").value;
     history("set-occupancy", { uid: w.uid, occupancy: w.occupancy });
+    updateDetails();
+    draw();
   }
 };
 $("confirm").onclick = () => {
   const w = selectedWell();
   if (w) {
+    if (
+      project.mode === "sequence" &&
+      $("boundaryApproval").value === "sequence"
+    )
+      return approveStable([w.uid]);
     w.detection.review_required = false;
     w.review_frames = (w.review_frames || []).filter(
       (frame) => frame !== index,
@@ -953,7 +992,12 @@ $("saveCorrection").onclick = () => {
   if (count != null && (!Number.isInteger(count) || count < 0))
     return status("Egg count must be a nonnegative whole number.");
   const correction = {
-    state: study === "ccrt" ? $("correction").value || null : null,
+    state:
+      study === "ccrt"
+        ? selectedWell()?.occupancy === "empty"
+          ? record().correction?.state || null
+          : $("correction").value || null
+        : null,
     egg_count: study === "eggs" ? count : null,
     notes: $("notes").value,
     at: new Date().toISOString(),
@@ -1079,56 +1123,73 @@ $("csv").onclick = () =>
     "text/csv",
   );
 $("importButton").onclick = () => $("import").click();
-$("import").onchange = async (e) => {
+async function importSaved(file) {
   try {
-    const file = e.target.files[0];
     if (!file) return;
-    const loaded = C.validateProject(
-      JSON.parse(await file.text()),
-      project.frames,
-    );
-    if ((loaded.task || "ccrt") !== study)
+    if (!files.length)
       throw Error(
-        "Open the matching study page before restoring this project.",
+        "Select the original image files first, in their saved order.",
       );
-    if (
-      project.wells.length &&
-      !confirm("Replace this review with the saved project?")
-    )
-      return;
-    stop();
-    project = {
-      schema_version: 1,
-      task: study,
-      experiment_id: loaded.experiment_id || crypto.randomUUID(),
-      mode: loaded.mode,
-      interval: loaded.interval,
-      order: loaded.order,
-      wells: loaded.wells,
-      frames: loaded.frames,
-      records: loaded.records,
-      history: loaded.history || [],
-      detection_region: loaded.detection_region || null,
-      detection_regions: loaded.detection_regions || {},
-      detection_settings: loaded.detection_settings || null,
-      alignments: loaded.alignments || {},
-      alignment_failures: loaded.alignment_failures || {},
-    };
-    $("experiment").value = project.experiment_id;
-    lastLabelOperation = null;
+    const value = /\.zip$/i.test(file.name)
+      ? await TrainingExport.readArchiveJSON(file)
+      : JSON.parse(await file.text());
+    if (value.kind?.endsWith("-results")) {
+      const imported = C.importReadableReport(project, value);
+      if (
+        project.records &&
+        Object.keys(project.records).length &&
+        !confirm(
+          "Replace matching image/well annotations with the saved report labels?",
+        )
+      )
+        return;
+      project = imported.project;
+      lastLabelOperation = null;
+      $("experiment").value = project.experiment_id;
+      status(
+        `Imported ${imported.imported} report rows onto matching wells. Current boundaries are preserved; older readable reports cannot restore omitted geometry or full history.`,
+      );
+    } else {
+      const loaded = C.validateProject(value, project.frames);
+      if ((loaded.task || "ccrt") !== study)
+        throw Error(
+          "Open the matching study page before restoring this project.",
+        );
+      if (
+        project.wells.length &&
+        !confirm("Replace this review with the saved project?")
+      )
+        return;
+      stop();
+      project = {
+        ...loaded,
+        task: study,
+        experiment_id: loaded.experiment_id || crypto.randomUUID(),
+        history: loaded.history || [],
+      };
+      $("experiment").value = project.experiment_id;
+      lastLabelOperation = null;
+      selected = project.wells[0]?.uid || null;
+      status(
+        "Project restored. Images matched by path, size and modification time.",
+      );
+    }
     $("mode").value = project.mode;
     $("interval").value = project.interval;
     $("order").value = project.order || "name";
-    selected = project.wells[0]?.uid || null;
-    status(
-      "Project restored. Images matched by path, size and modification time.",
-    );
-    renderFrame();
+    await renderFrame();
   } catch (error) {
     status(error.message);
-  } finally {
-    e.target.value = "";
   }
+}
+$("import").onchange = async (e) => {
+  await importSaved(e.target.files[0]);
+  e.target.value = "";
+};
+$("importReportButton").onclick = () => $("importReport").click();
+$("importReport").onchange = async (e) => {
+  await importSaved(e.target.files[0]);
+  e.target.value = "";
 };
 window.addEventListener("beforeunload", (e) => {
   if (project.wells.length) {
@@ -1305,7 +1366,7 @@ function updateContext() {
   $("reviewGuide").textContent =
     study === "eggs"
       ? "Each image starts with its own full-image counting region. Count eggs there, or replace it with manually drawn regions. Regions and annotations belong only to that image."
-      : "Draw or correct wells on the first frame. Keep their IDs across the sequence; align or edit later frames and confirm each frame’s boundaries before exporting training data.";
+      : "Draw or correct wells on the first frame. Keep their IDs across the sequence; align or edit later frames. Approve stable boundaries across the sequence, or confirm individual frames when needed.";
   $("experiment").value ||= project.experiment_id;
   $("analyze").textContent =
     study === "eggs"
@@ -1350,6 +1411,10 @@ $("experiment").onchange = () => {
 };
 $("detectionMethod").onchange = updateContext;
 function labelRange(state, first, last) {
+  if (study === "ccrt" && selectedWell()?.occupancy === "empty")
+    return status(
+      "This well is empty. Change occupancy before assigning a coma/awake state.",
+    );
   if (busy || !selectedWell()) return status("Select a well first.");
   const count = last - first + 1;
   if (
@@ -1415,6 +1480,10 @@ $("report").onclick = async () => {
   try {
     const report = C.resultsReport(project),
       entries = [
+        {
+          name: "project.json",
+          text: JSON.stringify(C.exportProject(project), null, 2),
+        },
         { name: "report.json", text: JSON.stringify(report, null, 2) },
         { name: "results.csv", text: C.tableCSV(report.results) },
         { name: "summary.csv", text: C.tableCSV(report.summary) },
@@ -1430,7 +1499,7 @@ $("report").onclick = async () => {
     }
     entries.push({
       name: "README.txt",
-      text: `FlyScope ${study} results\nresults.csv and report.json contain readable per-image/region results without polygon arrays. summary.csv contains ${study === "eggs" ? "counted-region totals; uncounted regions are explicit, not zero" : "per-well states, durations and transition counts"}. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first frame; IDs stay stable through camera corrections. Save a separate project backup for editable boundaries, model provenance and history. Training datasets are a separate export.\n`,
+      text: `FlyScope ${study} results\nresults.csv and report.json contain readable per-image/region results without polygon arrays. summary.csv contains ${study === "eggs" ? "counted-region totals; uncounted regions are explicit, not zero" : "per-well states, durations and transition counts"}. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first frame; IDs stay stable through camera corrections. The included project.json restores editable boundaries, annotations, model provenance and history via Import report. Training datasets are a separate export.\n`,
     });
     download(
       `flyscope-${study}-report.zip`,
@@ -1511,3 +1580,21 @@ document.querySelector("nav").addEventListener("click", (e) => {
     status("Finish or cancel the current operation before changing studies.");
   }
 });
+
+function approveStable(uids) {
+  if (busy || !uids.length) return;
+  if (
+    !confirm(
+      "Approve these boundaries across the whole sequence based on stable well positions? Existing geometry and annotations are preserved. Frames with failed alignments remain pending.",
+    )
+  )
+    return;
+  const result = C.approveStableBoundaries(project, uids);
+  updateDetails();
+  draw();
+  status(
+    `Approved ${result.approved} well/frame boundaries across the sequence; ${result.skipped} failed-alignment boundaries remain pending. Later geometry edits will need review again.`,
+  );
+}
+$("confirmSequence").onclick = () =>
+  approveStable(project.wells.map((w) => w.uid));
