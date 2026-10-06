@@ -5,12 +5,14 @@ const C = ReviewCore,
     coma: "#ff304f",
     awake: "#00ec57",
     unknown: "#9cacc1",
-    empty: "#ffd447",
+    empty: "#00cfff",
+    invalid: "#dc70ff",
   },
   study = document.body.dataset.study || "ccrt";
 let lastLabelOperation = null;
 let project = {
     schema_version: 1,
+    time_origin: { confirmed: true, offset_seconds: 0 },
     task: study,
     experiment_id: crypto.randomUUID(),
     mode: study === "eggs" ? "batch" : "sequence",
@@ -72,6 +74,7 @@ function draw() {
     ctx.drawImage(layer, 0, 0);
   }
   visibleWells().forEach((w) => {
+    if (study === "eggs" && $("eggScope").value === "image") return;
     const pts = C.geometry(w, index),
       state = C.effective(
         project.records[C.key(index, w.uid)],
@@ -84,9 +87,13 @@ function draw() {
     ctx.strokeStyle = study === "eggs" ? "#ffe000" : colors[state];
     ctx.lineWidth = w.uid === selected ? 5 : 3;
     ctx.setLineDash(
-      w.detection.review_required || w.review_frames?.includes(index)
-        ? [8, 5]
-        : [],
+      state === "empty"
+        ? [3, 4]
+        : state === "unknown"
+          ? [10, 6]
+          : w.detection.review_required || w.review_frames?.includes(index)
+            ? [8, 5]
+            : [],
     );
     ctx.stroke();
     ctx.setLineDash([]);
@@ -106,7 +113,9 @@ function draw() {
                 ? "A"
                 : state === "empty"
                   ? "E"
-                  : "?")
+                  : state === "invalid"
+                    ? "!"
+                    : "?")
           : ""),
       x + 7,
       y - 6,
@@ -295,7 +304,7 @@ function updateDetails() {
     "nextLabel",
   ].forEach((id) => ($(id).disabled = !w || busy));
   $("wellName").value = w?.id || "";
-  if (study === "ccrt" && w?.occupancy === "empty")
+  if (study === "ccrt" && ["empty", "multiple"].includes(w?.occupancy))
     for (const id of [
       "correction",
       "labelComa",
@@ -308,8 +317,10 @@ function updateDetails() {
       $(id).disabled = true;
   $("occupancy").value = w?.occupancy || "unknown";
   $("correction").value =
-    study === "ccrt" && w?.occupancy === "empty"
-      ? "empty"
+    study === "ccrt" && ["empty", "multiple"].includes(w?.occupancy)
+      ? w.occupancy === "empty"
+        ? "empty"
+        : "invalid"
       : r.correction?.state || "";
   $("eggCount").value = r.correction?.egg_count ?? "";
   $("notes").value = r.correction?.notes || "";
@@ -325,63 +336,51 @@ function updateDetails() {
   updateContext();
 }
 function renderSummary() {
-  const body = $("summary");
+  const rows = C.humanReport(project).results,
+    body = $("summary");
   body.replaceChildren();
-  if (study === "eggs") {
-    $("summaryHead").innerHTML =
-      "<tr><th>Image</th><th>Regions</th><th>Counted</th><th>Uncounted</th><th>Total counted eggs</th></tr>";
-    C.resultsReport(project).summary.forEach((row) => {
-      const tr = document.createElement("tr");
-      [
-        row.filename,
-        row.regions,
-        row.counted_regions,
-        row.uncounted_regions,
-        row.total_counted_eggs ?? "—",
-      ].forEach((v) => {
-        const td = document.createElement("td");
-        td.textContent = v;
-        tr.append(td);
-      });
-      body.append(tr);
-    });
-    return;
+  $("summaryHead").replaceChildren();
+  const head = document.createElement("tr");
+  Object.keys(rows[0] || {}).forEach((key) => {
+    const th = document.createElement("th");
+    th.textContent = key;
+    head.append(th);
+  });
+  const temporal = study === "ccrt" && project.mode === "sequence";
+  if (temporal) {
+    const th = document.createElement("th");
+    th.textContent = "Timeline";
+    head.append(th);
   }
-  C.summary(project).forEach((s) => {
+  $("summaryHead").append(head);
+  rows.forEach((row, rowIndex) => {
     const tr = document.createElement("tr");
-    [
-      s.well_id,
-      s.total_frames,
-      project.mode === "sequence"
-        ? `${s.awake_frames} frames / ${s.awake_seconds.toFixed(2)} s`
-        : s.awake_frames,
-      project.mode === "sequence"
-        ? `${s.coma_frames} frames / ${s.coma_seconds.toFixed(2)} s`
-        : s.coma_frames,
-      `${s.unknown_frames} uncertain / unlabeled · ${s.empty_frames} empty`,
-      s.transitions ?? "—",
-      s.average_model_confidence == null
-        ? "—"
-        : `${Math.round(s.average_model_confidence * 100)}%`,
-    ].forEach((v) => {
+    Object.values(row).forEach((value) => {
       const td = document.createElement("td");
-      td.textContent = v;
+      td.textContent = value === "" ? "—" : value;
       tr.append(td);
     });
-    const td = document.createElement("td"),
-      spark = document.createElement("div");
-    spark.className = "spark";
-    s.states.forEach((state, i) => {
-      const span = document.createElement("span");
-      span.style.background = colors[state];
-      span.title = `Frame ${i + 1}: ${state}`;
-      spark.append(span);
-    });
-    td.append(spark);
-    tr.append(td);
+    if (temporal) {
+      const td = document.createElement("td"),
+        spark = document.createElement("div");
+      spark.className = "spark";
+      project.frames.forEach((_, i) => {
+        const state = C.effective(
+            project.records[C.key(i, project.wells[rowIndex].uid)],
+            project.wells[rowIndex],
+          ),
+          span = document.createElement("span");
+        span.style.background = colors[state];
+        span.title = `Frame ${i + 1}: ${state}`;
+        spark.append(span);
+      });
+      td.append(spark);
+      tr.append(td);
+    }
     body.append(tr);
   });
 }
+
 function select(uid) {
   selected = uid;
   draft = [];
@@ -407,6 +406,15 @@ function addWell(
     overrides: {},
     detection,
     occupancy: "unknown",
+    area_type:
+      study === "eggs"
+        ? points.length === 4 &&
+          points.every(
+            (p) => (p[0] === 0 || p[0] === 1) && (p[1] === 0 || p[1] === 1),
+          )
+          ? "image"
+          : "region"
+        : undefined,
     active_frames: study === "eggs" ? [index] : undefined,
     review_frames:
       study === "eggs"
@@ -458,6 +466,10 @@ async function loadFiles(input) {
   urls = files.map((f) => URL.createObjectURL(f));
   project = {
     schema_version: 1,
+    time_origin: {
+      confirmed: $("timeConfirmed").checked,
+      offset_seconds: Math.max(0, Number($("recoveryDelay").value) || 0),
+    },
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
@@ -531,6 +543,11 @@ function setBusy(value) {
     "json",
     "csv",
     "report",
+    "machine",
+    "timeConfirmed",
+    "recoveryDelay",
+    "eggScope",
+    "confirmSingles",
     "training",
     "experiment",
   ].forEach((id) => ($(id).disabled = value));
@@ -613,6 +630,7 @@ function invalidate(uid, frame) {
   }
 }
 function saveGeometry(w, points) {
+  if (study === "eggs") w.area_type = "region";
   if ($("scope").value === "frame" || study === "eggs") {
     w.overrides[index] = points;
     invalidate(w.uid, index);
@@ -645,7 +663,8 @@ function position(event) {
   ];
 }
 canvas.addEventListener("pointerdown", (e) => {
-  if (!image || busy) return;
+  if (!image || busy || (study === "eggs" && $("eggScope").value === "image"))
+    return;
   stop();
   const p = position(e),
     tool = $("tool").value;
@@ -833,6 +852,10 @@ $("mode").onchange = () => {
   draft = [];
   project = {
     schema_version: 1,
+    time_origin: {
+      confirmed: $("timeConfirmed").checked,
+      offset_seconds: Math.max(0, Number($("recoveryDelay").value) || 0),
+    },
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
@@ -994,7 +1017,7 @@ $("saveCorrection").onclick = () => {
   const correction = {
     state:
       study === "ccrt"
-        ? selectedWell()?.occupancy === "empty"
+        ? ["empty", "multiple"].includes(selectedWell()?.occupancy)
           ? record().correction?.state || null
           : $("correction").value || null
         : null,
@@ -1119,7 +1142,7 @@ $("json").onclick = () =>
 $("csv").onclick = () =>
   download(
     `flyscope-${study}-results.csv`,
-    C.tableCSV(C.resultsReport(project).results),
+    C.tableCSV(C.humanReport(project).results),
     "text/csv",
   );
 $("importButton").onclick = () => $("import").click();
@@ -1150,7 +1173,7 @@ async function importSaved(file) {
         `Imported ${imported.imported} report rows onto matching wells. Current boundaries are preserved; older readable reports cannot restore omitted geometry or full history.`,
       );
     } else {
-      const loaded = C.validateProject(value, project.frames);
+      const loaded = C.validateProject(value.project || value, project.frames);
       if ((loaded.task || "ccrt") !== study)
         throw Error(
           "Open the matching study page before restoring this project.",
@@ -1177,6 +1200,11 @@ async function importSaved(file) {
     $("mode").value = project.mode;
     $("interval").value = project.interval;
     $("order").value = project.order || "name";
+    $("timeConfirmed").checked = project.time_origin?.confirmed ?? true;
+    $("recoveryDelay").value = project.time_origin?.offset_seconds || 0;
+    $("eggScope").value = project.wells.some((w) => !C.imageArea(w))
+      ? "areas"
+      : "image";
     await renderFrame();
   } catch (error) {
     status(error.message);
@@ -1343,13 +1371,18 @@ function updateContext() {
   const sequence = study === "ccrt" && $("mode").value === "sequence",
     multiple = $("mode").value !== "single";
   document
-    .querySelectorAll("[data-ccrt],[data-eggs],[data-sequence],[data-multiple]")
+    .querySelectorAll(
+      "[data-ccrt],[data-eggs],[data-sequence],[data-multiple],[data-geometry]",
+    )
     .forEach((el) => {
       el.hidden =
         (el.hasAttribute("data-ccrt") && study !== "ccrt") ||
         (el.hasAttribute("data-eggs") && study !== "eggs") ||
         (el.hasAttribute("data-sequence") && !sequence) ||
-        (el.hasAttribute("data-multiple") && !multiple);
+        (el.hasAttribute("data-multiple") && !multiple) ||
+        (el.hasAttribute("data-geometry") &&
+          study === "eggs" &&
+          $("eggScope").value === "image");
     });
   document
     .querySelector(".previews")
@@ -1357,6 +1390,12 @@ function updateContext() {
   $("currentCaption").textContent = sequence
     ? "T — current frame"
     : "Current image";
+  document.querySelector("#wellSelect").previousElementSibling.textContent =
+    study === "ccrt"
+      ? "Selected well"
+      : $("eggScope").value === "image"
+        ? "Selected image"
+        : "Selected counting area";
   $("summaryTitle").textContent =
     study === "eggs"
       ? "Egg-count summary"
@@ -1365,7 +1404,7 @@ function updateContext() {
         : "Image summary";
   $("reviewGuide").textContent =
     study === "eggs"
-      ? "Each image starts with its own full-image counting region. Count eggs there, or replace it with manually drawn regions. Regions and annotations belong only to that image."
+      ? "Count each independent image. No well layout is assumed. Optional custom areas are available if future data need them; the annotation format is provisional."
       : "Draw or correct wells on the first frame. Keep their IDs across the sequence; align or edit later frames. Approve stable boundaries across the sequence, or confirm individual frames when needed.";
   $("experiment").value ||= project.experiment_id;
   $("analyze").textContent =
@@ -1387,13 +1426,6 @@ function updateContext() {
       : $("layout").value === "individual"
         ? "Single-well detection fits one dominant rim in a close crop. Draw a boundary or select the full image if no rim is visible."
         : "Size and repeated-spacing filters reduce fixture proposals. Set a diameter when automatic estimation is wrong, or draw a detection region to exclude hardware.";
-  if (study === "ccrt") {
-    const header = $("summaryHead").querySelectorAll("th");
-    if (header[5]) header[5].hidden = !sequence;
-    document.querySelectorAll("#summary tr").forEach((tr) => {
-      if (tr.children[5]) tr.children[5].hidden = !sequence;
-    });
-  }
   $("diameter").closest("label").hidden =
     $("detectionMethod").value === "contours";
   document
@@ -1411,9 +1443,12 @@ $("experiment").onchange = () => {
 };
 $("detectionMethod").onchange = updateContext;
 function labelRange(state, first, last) {
-  if (study === "ccrt" && selectedWell()?.occupancy === "empty")
+  if (
+    study === "ccrt" &&
+    ["empty", "multiple"].includes(selectedWell()?.occupancy)
+  )
     return status(
-      "This well is empty. Change occupancy before assigning a coma/awake state.",
+      "Empty or multiple-individual wells have no valid CCRT state. Check occupancy before assigning labels.",
     );
   if (busy || !selectedWell()) return status("Select a well first.");
   const count = last - first + 1;
@@ -1478,7 +1513,7 @@ $("report").onclick = async () => {
   setBusy(true);
   cancelled = false;
   try {
-    const report = C.resultsReport(project),
+    const report = C.humanReport(project),
       entries = [
         {
           name: "project.json",
@@ -1487,9 +1522,20 @@ $("report").onclick = async () => {
         { name: "report.json", text: JSON.stringify(report, null, 2) },
         { name: "results.csv", text: C.tableCSV(report.results) },
         { name: "summary.csv", text: C.tableCSV(report.summary) },
-        { name: "well-locations.csv", text: C.tableCSV(report.well_map) },
+        {
+          name: "well-locations.csv",
+          text: C.tableCSV(C.resultsReport(project).well_map),
+        },
+        { name: "report.html", text: humanHTML(report) },
       ];
-    const frames = study === "eggs" ? project.frames.map((_, i) => i) : [0];
+    const frames =
+      study === "eggs"
+        ? project.frames
+            .map((_, i) => i)
+            .filter((i) =>
+              project.wells.some((w) => C.activeWell(w, i) && !C.imageArea(w)),
+            )
+        : [0];
     for (const frame of frames) {
       if (cancelled) throw Error("Report export cancelled.");
       entries.push({
@@ -1499,7 +1545,7 @@ $("report").onclick = async () => {
     }
     entries.push({
       name: "README.txt",
-      text: `FlyScope ${study} results\nresults.csv and report.json contain readable per-image/region results without polygon arrays. summary.csv contains ${study === "eggs" ? "counted-region totals; uncounted regions are explicit, not zero" : "per-well states, durations and transition counts"}. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first frame; IDs stay stable through camera corrections. The included project.json restores editable boundaries, annotations, model provenance and history via Import report. Training datasets are a separate export.\n`,
+      text: `FlyScope ${study} results\nOpen report.html for the human report. results.csv contains compact ${study === "eggs" ? "independent-image counts" : "one-row-per-well occupancy, observed durations and sampled CCRT"}. summary.csv contains two-column experimental measurements. Missing values are not zero. Machine analysis is a separate export with frame-level labels and provenance. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first frame; IDs stay stable through camera corrections. The included project.json restores editable boundaries, annotations, model provenance and history via Import report. Training datasets are a separate export.\n`,
     });
     download(
       `flyscope-${study}-report.zip`,
@@ -1598,3 +1644,131 @@ function approveStable(uids) {
 }
 $("confirmSequence").onclick = () =>
   approveStable(project.wells.map((w) => w.uid));
+
+function humanHTML(report) {
+  const esc = (v) =>
+    String(v ?? "").replace(
+      /[&<>"']/g,
+      (ch) =>
+        ({
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        })[ch],
+    );
+  const table = (rows) =>
+    "<table><thead><tr>" +
+    Object.keys(rows[0] || {})
+      .map((k) => "<th>" + esc(k) + "</th>")
+      .join("") +
+    "</tr></thead><tbody>" +
+    rows
+      .map(
+        (r) =>
+          "<tr>" +
+          Object.values(r)
+            .map((v) => "<td>" + esc(v === "" ? "—" : v) + "</td>")
+            .join("") +
+          "</tr>",
+      )
+      .join("") +
+    "</tbody></table>";
+  return (
+    '<!doctype html><meta charset="utf-8"><title>FlyScope report</title><style>body{font:16px system-ui;margin:2rem;color:#182332}table{border-collapse:collapse;margin:1rem 0}td,th{padding:.6rem;border:1px solid #aaa;text-align:left}th{background:#eee}</style><h1>' +
+    esc(report.task.toUpperCase()) +
+    " report</h1><p>Experiment: " +
+    esc(report.experiment_id) +
+    "</p>" +
+    table(report.results) +
+    table(report.summary) +
+    report.definitions.map((d) => "<p>" + esc(d) + "</p>").join("") +
+    "<p>Well positions: see well-locations.csv and numbered images in maps/. project.json is the editable backup; use Import report to restore it.</p>"
+  );
+}
+$("machine").onclick = async () => {
+  if (!files.length) return status("Load images first.");
+  stop();
+  setBusy(true);
+  cancelled = false;
+  try {
+    const report = C.machineReport(project);
+    const entries = [
+      { name: "machine.json", text: JSON.stringify(report, null, 2) },
+      {
+        name: "project.json",
+        text: JSON.stringify(C.exportProject(project), null, 2),
+      },
+      {
+        name: "frames.csv",
+        text: C.tableCSV(C.exportProject(project).results),
+      },
+      { name: "recovery.csv", text: C.tableCSV(report.recovery || []) },
+      {
+        name: "README.txt",
+        text: "Machine analysis retains frame labels, geometry, model confidence/version, manual corrections, timing bounds and complete editable project/history. Use the separate human report for compact results. Training exports additionally contain original images, masked crops and eligible manual targets.",
+      },
+    ];
+    download(
+      `flyscope-${study}-machine.zip`,
+      await TrainingExport.zip(
+        entries,
+        () => {},
+        () => cancelled,
+      ),
+      "application/zip",
+    );
+    status("Machine analysis exported.");
+  } catch (e) {
+    status(e.message);
+  } finally {
+    setBusy(false);
+    renderFrame();
+  }
+};
+$("confirmSingles").onclick = () => {
+  if (
+    busy ||
+    !confirm(
+      "Confirm that every currently unchecked well contains exactly one individual? Empty, multiple and obscured wells remain unchanged.",
+    )
+  )
+    return;
+  const uids = [];
+  project.wells.forEach((w) => {
+    if (!w.occupancy || w.occupancy === "unknown") {
+      w.occupancy = "single";
+      uids.push(w.uid);
+    }
+  });
+  history("confirm-single-occupancy", { uids });
+  updateDetails();
+  draw();
+};
+function setTimeOrigin() {
+  const offset = Number($("recoveryDelay").value);
+  if (!Number.isFinite(offset) || offset < 0)
+    return status("Delay must be nonnegative.");
+  project.time_origin = {
+    confirmed: $("timeConfirmed").checked,
+    offset_seconds: offset,
+  };
+  history("set-time-origin", project.time_origin);
+  renderSummary();
+}
+$("timeConfirmed").onchange = $("recoveryDelay").onchange = setTimeOrigin;
+$("eggScope").onchange = () => {
+  if (
+    $("eggScope").value === "image" &&
+    project.wells.some((w) => !C.imageArea(w))
+  ) {
+    $("eggScope").value = "areas";
+    status(
+      "Keep custom areas visible while this project contains area annotations.",
+    );
+  }
+  $("tool").value = "select";
+  updateContext();
+  draw();
+};

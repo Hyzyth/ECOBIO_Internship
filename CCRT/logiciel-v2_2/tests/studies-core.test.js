@@ -18,6 +18,7 @@ function project(task = "ccrt") {
       {
         id: "W1",
         uid: "well1",
+        occupancy: "single",
         points: [
           [0.1, 0.1],
           [0.8, 0.1],
@@ -240,4 +241,85 @@ test("ZIP report import prefers full project and checks data CRC", async () => {
     { name: "report.json", text: '{"kind":"ccrt-results"}' },
   ]);
   assert.equal((await Z.readArchiveJSON(legacy)).kind, "ccrt-results");
+});
+
+test("compact human metrics use frame one time zero, delay and observed duration", () => {
+  const p = project();
+  C.applyStateRange(p, "well1", 0, 1, "coma");
+  C.applyStateRange(p, "well1", 2, 2, "awake");
+  let m = C.recoveryMetrics(p, p.wells[0]);
+  assert.equal(m.ccrt_seconds, 4);
+  assert.equal(m.coma_seconds, 4);
+  assert.equal(m.awake_seconds, 0);
+  assert.equal(m.recovery_lower_seconds, 2);
+  p.time_origin = { confirmed: true, offset_seconds: 5 };
+  assert.equal(C.recoveryMetrics(p, p.wells[0]).ccrt_seconds, 9);
+  const human = C.humanReport(p);
+  assert.equal(human.results.length, 1);
+  assert.equal(human.results[0]["CCRT (s)"], 9);
+  assert.ok(
+    human.summary.every((r) => Object.keys(r).join(",") === "Measure,Value"),
+  );
+  assert.ok(
+    Object.values(human.results[0]).every((v) => typeof v !== "object"),
+  );
+  assert.equal(
+    C.machineReport(p).project.records["2:well1"].correction.state,
+    "awake",
+  );
+  C.applyStateRange(p, "well1", 1, 1, "unknown");
+  m = C.recoveryMetrics(p, p.wells[0]);
+  assert.equal(m.ccrt_seconds, null);
+  assert.equal(m.recovery_upper_seconds, 9);
+  assert.equal(m.status, "Uncertain recovery interval");
+});
+test("occupancy prevents invalid CCRT and training; empty and multiple override uncertain labels", () => {
+  const p = project();
+  C.applyStateRange(p, "well1", 0, 1, "coma");
+  C.applyStateRange(p, "well1", 2, 2, "awake");
+  for (const occupancy of ["empty", "multiple", "unknown", "obscured"]) {
+    p.wells[0].occupancy = occupancy;
+    assert.equal(C.recoveryMetrics(p, p.wells[0]).ccrt_seconds, null);
+    assert.ok(
+      C.trainingAnnotations(p).every(
+        (a) =>
+          !a.eligible_for_training &&
+          a.exclusion_reasons.includes("occupancy_not_confirmed_single"),
+      ),
+    );
+  }
+  p.wells[0].occupancy = "empty";
+  assert.equal(
+    C.effective({ correction: { state: "unknown" } }, p.wells[0]),
+    "empty",
+  );
+  p.wells[0].occupancy = "multiple";
+  assert.equal(C.effective({}, p.wells[0]), "invalid");
+});
+test("censored recovery is never reported as zero or an exact unobserved recovery", () => {
+  const p = project();
+  C.applyStateRange(p, "well1", 0, 2, "awake");
+  assert.equal(C.recoveryMetrics(p, p.wells[0]).ccrt_seconds, null);
+  assert.match(C.recoveryMetrics(p, p.wells[0]).status, /left-censored/);
+  C.applyStateRange(p, "well1", 0, 2, "coma");
+  assert.equal(C.recoveryMetrics(p, p.wells[0]).ccrt_seconds, null);
+  assert.match(C.recoveryMetrics(p, p.wells[0]).status, /Not recovered/);
+  C.applyStateRange(p, "well1", 1, 1, "awake");
+  assert.match(C.recoveryMetrics(p, p.wells[0]).status, /coma after/);
+});
+test("egg skeleton annotations identify independent whole images without occupancy constraints", () => {
+  const p = project("eggs");
+  p.wells[0].points = [
+    [0, 0],
+    [1, 0],
+    [1, 1],
+    [0, 1],
+  ];
+  p.wells[0].occupancy = "unknown";
+  p.records["0:well1"] = { correction: { egg_count: 0 } };
+  const a = C.trainingAnnotations(p)[0];
+  assert.equal(a.annotation_unit, "image");
+  assert.equal(a.annotation_type, "count");
+  assert.equal(a.eligible_for_training, true);
+  assert.equal(C.humanReport(p).results[0]["Egg count"], 0);
 });

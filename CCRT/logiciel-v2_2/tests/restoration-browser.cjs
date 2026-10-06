@@ -59,6 +59,30 @@ from pathlib import Path
 p=Path(${JSON.stringify(out)})
 with zipfile.ZipFile(p/'old-report.zip','w',compression=zipfile.ZIP_DEFLATED) as z:z.write(p/'old-report.json','report.json')`,
   ]);
+  await page.evaluate(() => {
+    window.paintCalls = [];
+    const original = ctx.fillText.bind(ctx);
+    ctx.fillText = (text, ...args) => {
+      paintCalls.push({ text, color: ctx.fillStyle });
+      original(text, ...args);
+    };
+  });
+  await page.locator("#occupancy").selectOption("empty");
+  const mark = await page.evaluate(() => paintCalls.at(-1));
+  assert.equal(mark.text, "W1 E");
+  assert.equal(mark.color, "#00cfff");
+  assert.equal(
+    await page
+      .locator("#summary tr")
+      .first()
+      .locator("td")
+      .nth(1)
+      .textContent(),
+    "Empty",
+  );
+  await page.locator("#occupancy").selectOption("multiple");
+  assert.equal(await page.locator("#correction").inputValue(), "invalid");
+  assert.equal(await page.evaluate(() => paintCalls.at(-1).text), "W1 !");
   await page.locator("#occupancy").selectOption("empty");
   assert.match(await page.locator("#prediction").textContent(), /EMPTY/);
   assert.equal(await page.locator("#correction").inputValue(), "empty");

@@ -85,6 +85,7 @@
   }
   function effective(record, well) {
     if (well?.occupancy === "empty") return "empty";
+    if (well?.occupancy === "multiple") return "invalid";
     return record?.correction?.state || record?.prediction || "unknown";
   }
   function key(frame, well) {
@@ -96,6 +97,7 @@
         coma = 0,
         unknown = 0,
         empty = 0,
+        invalid = 0,
         transitions = 0,
         previous = null,
         confidence = [];
@@ -105,10 +107,11 @@
         if (s === "awake") awake++;
         else if (s === "coma") coma++;
         else if (s === "empty") empty++;
+        else if (s === "invalid") invalid++;
         else unknown++;
         if (previous === "coma" && s === "awake") transitions++;
         previous = s;
-        if (s !== "empty" && r?.confidence != null)
+        if (!["empty", "invalid"].includes(s) && r?.confidence != null)
           confidence.push(r.confidence);
         return s;
       });
@@ -119,6 +122,7 @@
         coma_frames: coma,
         unknown_frames: unknown,
         empty_frames: empty,
+        invalid_frames: invalid,
         occupancy: well.occupancy || "unknown",
         awake_seconds:
           project.mode === "sequence" ? awake * project.interval : null,
@@ -247,6 +251,13 @@
         p.detection_region[1] >= p.detection_region[3])
     )
       throw Error("Invalid detection region.");
+    if (
+      p.time_origin != null &&
+      (typeof p.time_origin.confirmed !== "boolean" ||
+        !Number.isFinite(p.time_origin.offset_seconds) ||
+        p.time_origin.offset_seconds < 0)
+    )
+      throw Error("Invalid recovery time origin.");
     if (p.detection_regions != null) {
       if (
         typeof p.detection_regions !== "object" ||
@@ -304,6 +315,15 @@
             )))
       )
         throw Error("Invalid well boundaries or duplicate identities.");
+      if (
+        w.occupancy != null &&
+        !["unknown", "empty", "single", "multiple", "obscured"].includes(
+          w.occupancy,
+        )
+      )
+        throw Error("Invalid occupancy.");
+      if (w.area_type != null && !["image", "region"].includes(w.area_type))
+        throw Error("Invalid annotation area type.");
       ids.add(w.uid);
       names.add(w.id);
       if (
@@ -571,14 +591,22 @@
           boundary_reviewed: reviewed,
           boundary_partial: partial,
           occupancy: w.occupancy || "unknown",
+          annotation_unit:
+            task === "eggs" ? (imageArea(w) ? "image" : "region") : "well",
+          annotation_type: task === "eggs" ? "count" : "state",
+          exclusion_reasons: [
+            !reviewed ? "boundary_unreviewed" : null,
+            uncertain ? "uncertain_state" : null,
+            partial ? "partial_boundary" : null,
+            task === "ccrt" && w.occupancy !== "single"
+              ? "occupancy_not_confirmed_single"
+              : null,
+          ].filter(Boolean),
           eligible_for_training:
             reviewed &&
             !uncertain &&
             !partial &&
-            !(
-              task === "ccrt" &&
-              ["empty", "multiple", "obscured"].includes(w.occupancy)
-            ),
+            !(task === "ccrt" && w.occupancy !== "single"),
         });
       }),
     );
@@ -730,7 +758,273 @@
     return { project: copy, imported };
   }
 
+  function imageArea(well) {
+    return (
+      well.area_type === "image" ||
+      (!well.area_type &&
+        well.points.length === 4 &&
+        well.points.every(
+          (p) => (p[0] === 0 || p[0] === 1) && (p[1] === 0 || p[1] === 1),
+        ))
+    );
+  }
+  function recoveryMetrics(project, well) {
+    const states = project.frames.map((_, i) =>
+      effective(project.records[key(i, well.uid)], well),
+    );
+    const occupancy = well.occupancy || "unknown",
+      origin = project.time_origin || { confirmed: true, offset_seconds: 0 },
+      sequence = project.mode === "sequence",
+      interval = project.interval;
+    const result = {
+      well_id: well.id,
+      occupancy,
+      state: states[0] || "unknown",
+      coma_seconds: null,
+      awake_seconds: null,
+      uncertain_seconds: null,
+      first_awake_frame: null,
+      recovery_after_first_image_seconds: null,
+      ccrt_seconds: null,
+      recovery_lower_seconds: null,
+      recovery_upper_seconds: null,
+      status: "Occupancy unconfirmed",
+    };
+    if (occupancy === "empty") {
+      result.status = "Empty";
+      return result;
+    }
+    if (occupancy === "multiple") {
+      result.status = "Invalid: more than one individual";
+      return result;
+    }
+    if (occupancy === "obscured") {
+      result.status = "Cannot verify occupancy";
+      return result;
+    }
+    if (occupancy !== "single") return result;
+    if (!sequence) {
+      result.status = "Single image: no recovery timing";
+      return result;
+    }
+    // Sample-and-hold integration over the observed window, never beyond the
+    // final image. Unknown intervals remain unallocated to coma or awake.
+    result.coma_seconds =
+      states.slice(0, -1).filter((s) => s === "coma").length * interval;
+    result.awake_seconds =
+      states.slice(0, -1).filter((s) => s === "awake").length * interval;
+    result.uncertain_seconds =
+      states.slice(0, -1).filter((s) => s === "unknown").length * interval;
+    const first = states.indexOf("awake");
+    if (first < 0) {
+      result.status = states.every((s) => s === "coma")
+        ? "Not recovered during observation"
+        : "Recovery not observed / incomplete labels";
+      return result;
+    }
+    result.first_awake_frame = first + 1;
+    result.recovery_after_first_image_seconds = first * interval;
+    if (first === 0) {
+      result.status = "Already awake at first image (left-censored)";
+      return result;
+    }
+    let lastComa = -1;
+    for (let i = 0; i < first; i++) if (states[i] === "coma") lastComa = i;
+    if (lastComa < 0) {
+      result.status = "No preceding coma observation";
+      return result;
+    }
+    const delay = origin.confirmed ? origin.offset_seconds || 0 : 0;
+    result.recovery_lower_seconds = delay + lastComa * interval;
+    result.recovery_upper_seconds = delay + first * interval;
+    if (states.slice(first + 1).includes("coma")) {
+      result.status = "Review: coma after an awake label";
+      return result;
+    }
+    if (!origin.confirmed) {
+      result.status = "Confirm experimental time zero";
+      return result;
+    }
+    if (lastComa !== first - 1) {
+      result.status = "Uncertain recovery interval";
+      return result;
+    }
+    result.ccrt_seconds = result.recovery_upper_seconds;
+    result.status = "Observed (sampled)";
+    return result;
+  }
+  function humanReport(project) {
+    const task = taskOf(project),
+      fmt = (v) => (v == null ? "" : Math.round(v * 1000) / 1000);
+    let results, summary;
+    if (task === "eggs") {
+      results = eggSummary(project).map((s) => ({
+        Image: s.filename,
+        "Egg count": s.total_counted_eggs ?? "",
+        "Counted areas": s.counted_regions,
+        "Uncounted areas": s.uncounted_regions,
+        Status: s.uncounted_regions ? "Incomplete counts" : "Counted",
+      }));
+      summary = [
+        { Measure: "Images", Value: project.frames.length },
+        {
+          Measure: "Annotation format",
+          Value: "Independent whole-image counts; optional custom areas",
+        },
+        {
+          Measure: "Experimental layout",
+          Value: "Not specified; no well layout assumed",
+        },
+      ];
+    } else {
+      const measures = project.wells.map((w) => recoveryMetrics(project, w));
+      results = measures.map((m) => ({
+        Well: m.well_id,
+        Occupancy: {
+          empty: "Empty",
+          single: "Not empty (1 individual)",
+          multiple: "INVALID (>1 individual)",
+          obscured: "Obscured",
+          unknown: "Not checked",
+        }[m.occupancy],
+        "Coma (s)": fmt(m.coma_seconds),
+        "Awake (s)": fmt(m.awake_seconds),
+        "Uncertain (s)": fmt(m.uncertain_seconds),
+        "CCRT (s)": fmt(m.ccrt_seconds),
+        Status: m.status,
+      }));
+      if (project.mode === "single")
+        results = measures.map((m) => ({
+          Well: m.well_id,
+          Occupancy: {
+            empty: "Empty",
+            single: "Not empty (1 individual)",
+            multiple: "INVALID (>1 individual)",
+            obscured: "Obscured",
+            unknown: "Not checked",
+          }[m.occupancy],
+          State: m.state,
+          Status: m.status,
+        }));
+      const valid = measures
+          .filter((m) => m.ccrt_seconds != null)
+          .map((m) => m.ccrt_seconds)
+          .sort((a, b) => a - b),
+        n = valid.length;
+      summary = [
+        { Measure: "Wells", Value: project.wells.length },
+        {
+          Measure: "Empty",
+          Value: measures.filter((m) => m.occupancy === "empty").length,
+        },
+        {
+          Measure: "Confirmed single individual",
+          Value: measures.filter((m) => m.occupancy === "single").length,
+        },
+        {
+          Measure: "Invalid: multiple individuals",
+          Value: measures.filter((m) => m.occupancy === "multiple").length,
+        },
+        {
+          Measure: "Occupancy not verified",
+          Value: measures.filter((m) =>
+            ["unknown", "obscured"].includes(m.occupancy),
+          ).length,
+        },
+        { Measure: "Images", Value: project.frames.length },
+        {
+          Measure: "Frame interval (s)",
+          Value:
+            project.mode === "sequence" ? project.interval : "Not applicable",
+        },
+        {
+          Measure: "Time zero confirmed",
+          Value: (project.time_origin?.confirmed ?? true) ? "Yes" : "No",
+        },
+        {
+          Measure: "Cold end to first image (s)",
+          Value:
+            (project.time_origin?.confirmed ?? true)
+              ? project.time_origin?.offset_seconds || 0
+              : "Not confirmed",
+        },
+        { Measure: "Valid sampled CCRT measurements", Value: n },
+        {
+          Measure: "Median sampled CCRT (s)",
+          Value: n
+            ? fmt(
+                n % 2
+                  ? valid[(n - 1) / 2]
+                  : (valid[n / 2 - 1] + valid[n / 2]) / 2,
+              )
+            : "",
+        },
+      ];
+    }
+    if (task === "ccrt" && project.mode !== "sequence")
+      summary = summary.filter(
+        (r) =>
+          ![
+            "Frame interval (s)",
+            "Time zero confirmed",
+            "Cold end to first image (s)",
+            "Valid sampled CCRT measurements",
+            "Median sampled CCRT (s)",
+          ].includes(r.Measure),
+      );
+    return {
+      schema_version: 1,
+      kind: `${task}-human-report`,
+      task,
+      experiment_id: project.experiment_id || null,
+      results,
+      summary,
+      definitions:
+        task === "ccrt"
+          ? [
+              "One individual per well is required. Empty, multiple and unverified occupancy do not yield recovery measurements.",
+              "CCRT is the first labelled awake time following a coma observation, relative to confirmed cold-exposure end. The image interval limits precision. Unknown transition gaps and later coma labels require review; a missing CCRT is not zero.",
+              "Coma/awake durations use the state at the start of each sampling interval, from the first through last image; no duration is invented after the last image.",
+              "Already-awake and unrecovered wells are censored, not exact CCRT measurements. Machine exports retain numeric bounds, frame-level labels and provenance.",
+            ]
+          : [
+              "Egg counts are provisional independent-image annotations; no wells, temporal relation or final experimental layout are assumed.",
+              "Count custom areas without overlap if using area counts. Zero is distinct from not counted.",
+            ],
+    };
+  }
+  function machineReport(project) {
+    const report = resultsReport(project);
+    return {
+      ...report,
+      kind: `${taskOf(project)}-machine-report`,
+      summary:
+        taskOf(project) === "ccrt"
+          ? project.wells.map((w) => recoveryMetrics(project, w))
+          : report.summary,
+      duration_method:
+        "Sample-and-hold over first-to-last observation, excluding time after the last image",
+      project: exportProject(project),
+      time_origin: project.time_origin || {
+        confirmed: true,
+        offset_seconds: 0,
+      },
+      recovery:
+        taskOf(project) === "ccrt"
+          ? project.wells.map((w) => recoveryMetrics(project, w))
+          : null,
+      annotation_format:
+        taskOf(project) === "eggs"
+          ? "count (provisional); image or optional region"
+          : "well state; exactly one individual required",
+    };
+  }
+
   const api = {
+    imageArea,
+    recoveryMetrics,
+    humanReport,
+    machineReport,
     approveStableBoundaries,
     importReadableReport,
     activeWell,

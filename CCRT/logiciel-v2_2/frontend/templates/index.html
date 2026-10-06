@@ -70,6 +70,8 @@
             step="0.1"
             value="1"
         /></label>
+        <label data-sequence><input id="timeConfirmed" type="checkbox" checked /> Timing referenced to cold-exposure end</label><label data-sequence>Delay from cold-exposure end to frame 1 (seconds)<input id="recoveryDelay" type="number" min="0" step="0.1" value="0" /></label>
+        <p class="hint" data-sequence>Frame 1 is time zero by default. Enter a delay only if acquisition starts later.</p>
         <p class="hint" data-sequence>
           Confirm ordering in the frame list. Duration summaries use this
           interval; filenames supply optional timestamps, without an assumed
@@ -88,6 +90,9 @@
           Use the same experiment ID for related images. Training exports keep
           this group together to help avoid train/test leakage.
         </p>
+        <label data-eggs>Annotation scope<select id="eggScope"><option value="image">Whole image (no layout assumed)</option><option value="areas">Optional custom areas</option></select></label>
+        <p data-eggs class="hint">Independent images. The final egg annotation format can be adapted when the experimental data arrive.</p>
+        <div data-geometry id="geometryControls">
         <h2>02 / {{ 'Wells' if study == 'ccrt' else 'Regions' }}</h2>
         <label
           >Image layout<select id="layout">
@@ -146,6 +151,7 @@
           frame-specific corrections; review them or edit manually. Identities
           remain stable. Detection is a proposal, not an occupancy estimate.
         </p>
+        </div>
         <h2>03 / Model</h2>
         <label>Model<select id="model"></select></label>
         <p id="modelInfo" class="hint"></p>
@@ -154,7 +160,7 @@
         ><button id="cancel" class="secondary" hidden>Cancel analysis</button>
         <h2>04 / Save</h2>
         <button id="report">
-          Export {{ 'CCRT' if study == 'ccrt' else 'egg-count' }} report ZIP</button
+          Export {{ 'CCRT' if study == 'ccrt' else 'egg-count' }} human report ZIP</button
         ><button id="training" class="secondary">
           Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP
         </button>
@@ -162,9 +168,10 @@
           Reports include readable results, summaries and a numbered location
           map. Training datasets include original images, masked crops,
           annotations and a Python loader. Only manual labels become training
-          targets; uncertain, partial or unreviewed cases remain flagged for
+          targets; CCRT requires confirmed single occupancy. Uncertain, partial or unreviewed cases remain flagged for
           review.
         </p>
+        <button id="machine" class="secondary">Export machine analysis ZIP</button>
         <button id="json" class="secondary">Save project backup JSON</button
         ><button id="csv" class="secondary">Export readable results CSV</button
         ><button id="importButton" class="secondary">
@@ -184,10 +191,10 @@
             <h2>Image workspace</h2>
             <span data-ccrt class="legend"
               ><i class="coma"></i> Coma <i class="awake"></i> Awake
-              <i class="unknown"></i> Uncertain / unlabeled <i class="empty"></i> Empty</span
+              <i class="unknown"></i> Uncertain / unlabeled <i class="empty"></i> Empty (E) <span style="color:#dc70ff">! Multiple individuals</span></span
             >
           </div>
-          <div class="proposal-tools">
+          <div class="proposal-tools" data-geometry>
             <label
               >{{ 'Detected / drawn wells' if study == 'ccrt' else 'Counting regions on this image' }}<select id="proposalSelect">
                 <option value="">Select a well</option>
@@ -206,8 +213,8 @@
             later frame, approve stable boundaries, then annotate states. Training
             exports use that frame's boundary, not screenshots.
           </p>
-<button id="confirmSequence" data-sequence class="secondary">Approve stable boundaries for entire sequence</button>
-          <button id="confirmFrame" class="secondary">
+<button data-geometry id="confirmSequence" data-sequence class="secondary">Approve stable boundaries for entire sequence</button>
+          <button data-geometry id="confirmFrame" class="secondary">
             Confirm this frame’s boundaries
           </button>
           <div class="canvas-wrap">
@@ -249,24 +256,25 @@
         <div class="panel">
           <div class="panel-title">
             <h2>{{ 'Selected well' if study == 'ccrt' else 'Selected counting region' }}</h2>
-            <select id="wellSelect" aria-label="Select well">
+            <select id="wellSelect" data-geometry aria-label="Select well">
               <option value="">No well selected</option>
             </select>
           </div>
-          <div class="editor">
+          <div class="editor" data-geometry>
             <label
               >{{ 'Well identity' if study == 'ccrt' else 'Region identity' }}<input id="wellName" placeholder="e.g. A3" /></label
-            ><label
+            ><label data-ccrt
               >Occupancy<select id="occupancy">
-                <option value="unknown">Unknown</option>
+                <option value="unknown">Not checked</option>
                 <option value="empty">Empty</option>
-                <option value="single">One individual</option>
-                <option value="multiple">Multiple individuals</option>
+                <option value="single">Not empty — one individual</option>
+                <option value="multiple">More than one — protocol violation</option>
                 <option value="obscured">Obscured / unreliable</option>
               </select></label
             ><label data-sequence>Boundary approval<select id="boundaryApproval"><option value="sequence">Whole sequence (stable position)</option><option value="frame">Current frame only</option></select></label><button id="confirm" class="secondary">Confirm boundary</button
             ><button id="delete" class="danger">Delete well</button>
           </div>
+          <button id="confirmSingles" class="secondary" data-ccrt>Confirm unchecked wells contain one individual</button>
           <p id="wellProgress" class="hint" data-sequence></p><div class="quick-labels" data-sequence><button id="nextBoundary" class="secondary">Next unreviewed boundary</button><button id="nextLabel" class="secondary">Next unlabeled frame</button></div>
           <div id="prediction">No well selected.</div>
           <div class="editor">
@@ -275,7 +283,7 @@
                 <option value="">No override</option>
                 <option value="coma">Coma</option>
                 <option value="awake">Awake</option>
-                <option value="unknown">Unknown / uncertain</option><option value="empty" disabled>Empty — no state applicable</option>
+                <option value="unknown">Unknown / uncertain</option><option value="empty" disabled>Empty — no state applicable</option><option value="invalid" disabled>Multiple individuals — no valid state</option>
               </select></label
             ><label data-eggs
               >Manual egg count<input
