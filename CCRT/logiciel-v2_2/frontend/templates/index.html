@@ -1,108 +1,255 @@
-<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="utf-8">
-	<script src="/static/p5.js"></script>
-	<script src="/static/axios.min.js"></script>
-	<script src="/static/socket.io.min.js"></script>
-
-	<script src="/static/state.js"></script>
-	<script src="/static/p5view.js"></script>
-	<script src="/static/requests.js"></script>
-	<script src="/static/ui.js"></script>
-	<script src="/static/socket.js"></script>
-	<script src="/static/utils.js"></script>
-
-	<link rel="stylesheet" href="/static/styles.css"> 
-	<!-- <link rel="stylesheet"href="/static/pico.min.css"/> -->
-</head>
-
-<body>
-
-	<!-- <div class="container">
-		<h2>Création dossier images</h2>
-
-		<span class="line">
-			<input id="foldervideos_input" type="text" name="path" placeholder="Chemin du dossier général">
-			<button type="submit" onclick="setFolder_videos()">Créer</button>
-		</span>
-
-		<div id="foldervideos_status"></div>
-
-	</div> -->
-
-	<div class="container" style="padding-left: 10px;">
-
-		<h2>Chargement des images</h2>
-
-		<span class="line">
-			<input id="folder_input" type="text" name="path" placeholder="Chemin du dossier images">
-			<button type="submit" onclick="setFolder()">Charger</button>
-		</span>
-
-		<div id="folder_status"></div>
-
-
-		<hr>
-	
-
-		<button onclick="updateCanvas()">actualiser</button>
-		<br>
-		<button onclick="decrementIndex()"><</button>
-		<span id="counter">0/0</span>
-		<button onclick="incrementIndex()">></button>
-		<br>
-		<img id="viewer" style="max-width:50%; display:none;">
-		<div id="p5-container"></div>
-
-
-		<br>
-
-
-		<button onclick="createGrille()">update grille</button>
-		<br>
-		<div id="case"></div>
-		<div id="case-state"></div>
-
-	</div>
-
-
-
-	<div class="container" style="padding-left: 10px;">
-		<h2>Détermination états</h2>
-		<br>
-		<div class="line">
-			<button onclick="getComparaisonsVal()">compas</button>
-			Statut : <p id="compas_status">null</p>
-	        - progress : <p id="compas_prog">0</p>%
-		</div>
-		<br><br>
-		<!-- <button onclick="readCompa()">read compa</button>
-		<br><br> -->
-		<button onclick="updateCompaCase()">update compa case</button>
-		<br>
-		<div id="compa-case"></div>
-		<br><br>
-		<button onclick="decrementIndexSpecial()"><<</button>
-		<button onclick="decrementIndex()"><</button>
-		<button onclick="switchState()">wake up</button>
-		<button onclick="incrementIndex()">></button>
-		<button onclick="incrementIndexSpecial()">>></button>
-		
-		<hr>
-
-		<div class="line">
-			<button onclick="getCnnVal()">cnn</button>
-			Statut : <p id="cnn_status">null</p>
-			- progress : <p id="cnn_prog">0</p>%
-		</div>
-		
-		<hr>
-		
-		<button onclick="downloadResults()">Télécharger les résultats</button>
-	</div>
-
-
-	
-</body>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FlyScope · Experimental review</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="/static/review-core.js"></script>
+    <script defer src="/static/review.js"></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <span class="eyebrow">ECOBIO / EXPERIMENTAL WORKSPACE</span>
+        <h1>FlyScope <small>Coma recovery & egg studies</small></h1>
+      </div>
+      <span class="badge">Model-independent review</span>
+    </header>
+    <main>
+      <aside>
+        <h2>01 / Input</h2>
+        <label
+          >Analysis mode<select id="mode">
+            <option value="sequence">Ordered sequence</option>
+            <option value="single">Single image / Non-sequential</option>
+          </select></label
+        ><button id="browse">Browse image folder</button
+        ><input
+          id="folder"
+          type="file"
+          webkitdirectory
+          multiple
+          hidden
+        /><button id="filesButton" class="secondary">Choose image files</button
+        ><input
+          id="files"
+          type="file"
+          accept="image/png,image/jpeg,image/bmp,image/webp"
+          multiple
+          hidden
+        />
+        <p id="inputInfo" class="hint">
+          Images stay in your browser. Detection and model analysis send the
+          current image to the local server.
+        </p>
+        <label
+          >Sequence ordering<select id="order">
+            <option value="name">Filename timestamp / natural filename</option>
+            <option value="modified">File modification time</option>
+          </select></label
+        ><label
+          >Frame interval (seconds)<input
+            id="interval"
+            type="number"
+            min="0.001"
+            step="0.1"
+            value="1"
+        /></label>
+        <p class="hint">
+          Confirm ordering in the frame list. Duration summaries use this
+          interval; filenames supply optional timestamps, without an assumed
+          timezone.
+        </p>
+        <details>
+          <summary>Frame order</summary>
+          <ol id="frameList"></ol>
+        </details>
+        <h2>02 / Wells</h2>
+        <label
+          >Image layout<select id="layout">
+            <option value="grid">Full grid / multiple wells</option>
+            <option value="individual">Single well / individual</option>
+          </select></label
+        ><button id="detect">Suggest well boundaries</button
+        ><button id="align" class="secondary">
+          Align current frame to first</button
+        ><button id="whole" class="secondary">Use full image as one well</button
+        ><label
+          >Canvas tool<select id="tool">
+            <option value="select">Select / move well</option>
+            <option value="polygon">
+              Draw polygon (double-click to finish)
+            </option>
+            <option value="vertex">Edit boundary vertices</option>
+          </select></label
+        ><label
+          >Edit scope<select id="scope">
+            <option value="frame">Current frame (alignment correction)</option>
+            <option value="all">Shared boundary across frames</option>
+          </select></label
+        ><label
+          ><input id="mask" type="checkbox" checked /> Mask outside wells</label
+        >
+        <p class="hint">
+          Shapes use normalized coordinates. Camera alignment proposes
+          frame-specific corrections; review them or edit manually. Identities
+          remain stable. Detection is a proposal, not an occupancy estimate.
+        </p>
+        <h2>03 / Model</h2>
+        <label>Model<select id="model"></select></label>
+        <p id="modelInfo" class="hint"></p>
+        <button id="analyze">Analyze sequence</button
+        ><progress id="progress" value="0" max="1" hidden></progress
+        ><button id="cancel" class="secondary" hidden>Cancel analysis</button>
+        <h2>04 / Save</h2>
+        <button id="json">Export JSON / project</button
+        ><button id="csv" class="secondary">Export CSV</button
+        ><button id="importButton" class="secondary">
+          Restore JSON project</button
+        ><input id="import" type="file" accept="application/json" hidden />
+        <p class="hint">
+          Export before leaving. Restore by selecting the same image files, then
+          importing JSON. Images are not embedded.
+        </p>
+      </aside>
+      <section class="workspace">
+        <div id="status" role="status">
+          Choose a folder or image files to begin.
+        </div>
+        <div class="panel">
+          <div class="panel-title">
+            <h2>Image workspace</h2>
+            <span class="legend"
+              ><i class="coma"></i> Coma <i class="awake"></i> Awake
+              <i class="unknown"></i> Unknown</span
+            >
+          </div>
+          <div class="canvas-wrap">
+            <canvas
+              id="canvas"
+              width="1000"
+              height="650"
+              aria-label="Image and editable well boundaries"
+            ></canvas>
+            <p id="empty">Load images, then detect or draw well boundaries.</p>
+          </div>
+          <div class="controls">
+            <button id="previous" aria-label="Previous frame">←</button
+            ><button id="play">Play</button
+            ><button id="next" aria-label="Next frame">→</button
+            ><input
+              id="timeline"
+              type="range"
+              min="0"
+              max="0"
+              value="0"
+              aria-label="Timeline"
+            /><span id="frameCounter">0 / 0</span
+            ><label
+              >FPS<input
+                id="speed"
+                type="number"
+                min="0.1"
+                max="30"
+                step="0.5"
+                value="2" /></label
+            ><label
+              >Jump<input id="jump" type="number" min="1" value="1"
+            /></label>
+          </div>
+          <p id="frameName" class="hint"></p>
+        </div>
+        <div class="panel">
+          <div class="panel-title">
+            <h2>Selected well</h2>
+            <select id="wellSelect" aria-label="Select well">
+              <option value="">No well selected</option>
+            </select>
+          </div>
+          <div class="editor">
+            <label
+              >Well identity<input id="wellName" placeholder="e.g. A3" /></label
+            ><label
+              >Occupancy<select id="occupancy">
+                <option value="unknown">Unknown</option>
+                <option value="empty">Empty</option>
+                <option value="single">One individual</option>
+                <option value="multiple">Multiple individuals</option>
+                <option value="obscured">Obscured / unreliable</option>
+              </select></label
+            ><button id="confirm" class="secondary">Confirm boundary</button
+            ><button id="delete" class="danger">Delete well</button>
+          </div>
+          <div id="prediction">No well selected.</div>
+          <div class="editor">
+            <label
+              >Manual state<select id="correction">
+                <option value="">No override</option>
+                <option value="coma">Coma</option>
+                <option value="awake">Awake</option>
+                <option value="unknown">Unknown / uncertain</option>
+              </select></label
+            ><label
+              >Manual egg count<input
+                id="eggCount"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="Not counted" /></label
+            ><label
+              >Notes<input
+                id="notes"
+                placeholder="Reason / observation" /></label
+            ><button id="saveCorrection">Save current-frame annotation</button
+            ><button id="clearCorrection" class="secondary">
+              Clear annotation
+            </button>
+          </div>
+          <div class="previews">
+            <figure>
+              <figcaption>T−1</figcaption>
+              <canvas id="prevCrop" width="260" height="180"></canvas>
+            </figure>
+            <figure>
+              <figcaption>T</figcaption>
+              <canvas id="crop" width="260" height="180"></canvas>
+            </figure>
+            <figure>
+              <figcaption>T+1</figcaption>
+              <canvas id="nextCrop" width="260" height="180"></canvas>
+            </figure>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">
+            <h2>Sequence summary</h2>
+            <span class="hint">Effective states include manual overrides</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Well</th>
+                  <th>Frames</th>
+                  <th>Awake</th>
+                  <th>Coma</th>
+                  <th>Unknown</th>
+                  <th>Recovery transitions</th>
+                  <th>Mean model confidence</th>
+                  <th>State timeline</th>
+                </tr>
+              </thead>
+              <tbody id="summary"></tbody>
+            </table>
+          </div>
+          <p class="hint">
+            Time = classified frame count × confirmed interval. Unknown frames
+            interrupt transitions. Single-image mode reports counts only.
+            Occupancy and egg counts remain separate annotations.
+          </p>
+        </div>
+      </section>
+    </main>
+  </body>
 </html>
