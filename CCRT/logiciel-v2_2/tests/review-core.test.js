@@ -155,3 +155,17 @@ test("simple polygon validation rejects crossings, retracing, duplicate vertices
   ];
   assert.throws(() => C.validateProject(p, p.frames));
 });
+
+test("project restore preserves valid regions and rejects invalid registration metadata", () => {
+  const p = project();
+  p.detection_region = [0.1, 0.1, 0.9, 0.9];
+  p.alignments = {
+    1: { method: "perspective", inlier_ratio: 0.95, median_error_px: 0.5 },
+  };
+  assert.equal(C.validateProject(p, p.frames), p);
+  p.detection_region = [0.9, 0.1, 0.1, 0.9];
+  assert.throws(() => C.validateProject(p, p.frames));
+  p.detection_region = null;
+  p.alignments[1].inlier_ratio = 2;
+  assert.throws(() => C.validateProject(p, p.frames));
+});

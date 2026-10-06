@@ -90,6 +90,20 @@ function draw() {
       });
     }
   });
+  const region =
+    drag?.type === "region" ? drag.pending : project.detection_region;
+  if (region) {
+    ctx.strokeStyle = "#e8cb7d";
+    ctx.lineWidth = 3;
+    ctx.setLineDash([10, 5]);
+    ctx.strokeRect(
+      region[0] * canvas.width,
+      region[1] * canvas.height,
+      (region[2] - region[0]) * canvas.width,
+      (region[3] - region[1]) * canvas.height,
+    );
+    ctx.setLineDash([]);
+  }
   if (draft.length) {
     ctx.beginPath();
     draft.forEach((p, i) =>
@@ -114,7 +128,13 @@ async function renderFrame() {
   $("frameCounter").textContent = files.length
     ? `${index + 1} / ${files.length}`
     : "0 / 0";
-  $("frameName").textContent = files[index]?.name || "";
+  const alignment = project.alignments?.[index];
+  const alignmentFailure = project.alignment_failures?.[index];
+  $("frameName").textContent =
+    (files[index]?.name || "") +
+    (alignment
+      ? ` · ${alignment.method} alignment · ${(alignment.inlier_ratio * 100).toFixed(1)}% matched-feature inliers · ${alignment.median_error_px.toFixed(2)} px median feature error (resized image)`
+      : "");
   const sequence = project.mode === "sequence";
   $("analyze").textContent = sequence ? "Analyze sequence" : "Analyze image";
   ["previous", "next", "play", "timeline", "speed", "jump"].forEach(
@@ -401,6 +421,9 @@ function setBusy(value) {
     "diameter",
     "proposalSelect",
     "align",
+    "alignSequence",
+    "clearRegion",
+    "confirmFrame",
     "whole",
     "tool",
     "scope",
@@ -437,6 +460,8 @@ async function detect() {
     form.append("image", files[index]);
     form.append("method", $("detectionMethod").value);
     form.append("diameter", $("diameter").value);
+    if (project.detection_region)
+      form.append("region", JSON.stringify(project.detection_region));
     const data = await post("/api/detect", form);
     if (!data.wells.length) {
       status(
@@ -446,6 +471,7 @@ async function detect() {
     }
     project.wells = [];
     project.records = {};
+    project.detection_settings = data.settings;
     selected = null;
     data.wells.forEach((w) =>
       addWell(w.points, {
@@ -511,6 +537,11 @@ canvas.addEventListener("pointerdown", (e) => {
   const p = position(e),
     tool = $("tool").value;
   if (tool === "polygon") return;
+  if (tool === "region") {
+    drag = { type: "region", start: p, pending: null };
+    canvas.setPointerCapture(e.pointerId);
+    return;
+  }
   if (tool === "vertex" && selectedWell()) {
     const w = selectedWell(),
       points = C.geometry(w, index).map((p) => [...p]);
@@ -549,6 +580,16 @@ canvas.addEventListener("pointerdown", (e) => {
 canvas.addEventListener("pointermove", (e) => {
   if (!drag) return;
   const p = position(e);
+  if (drag.type === "region") {
+    drag.pending = [
+      Math.min(p[0], drag.start[0]),
+      Math.min(p[1], drag.start[1]),
+      Math.max(p[0], drag.start[0]),
+      Math.max(p[1], drag.start[1]),
+    ];
+    draw();
+    return;
+  }
   let points;
   if (drag.vertex != null) {
     points = drag.points.map((pt) => [...pt]);
@@ -579,6 +620,22 @@ canvas.addEventListener("pointermove", (e) => {
   draw();
 });
 function endDrag() {
+  if (drag?.type === "region") {
+    if (
+      drag.pending &&
+      drag.pending[2] - drag.pending[0] > 0.01 &&
+      drag.pending[3] - drag.pending[1] > 0.01
+    ) {
+      project.detection_region = drag.pending;
+      history("set-detection-region", { region: drag.pending });
+      status(
+        "Detection region saved. Only complete boundary proposals inside it will be considered.",
+      );
+    }
+    drag = null;
+    draw();
+    return;
+  }
   if (drag?.pending) saveGeometry(drag.well, drag.pending);
   drag = null;
   draw();
@@ -948,6 +1005,10 @@ $("import").onchange = async (e) => {
       frames: loaded.frames,
       records: loaded.records,
       history: loaded.history || [],
+      detection_region: loaded.detection_region || null,
+      detection_settings: loaded.detection_settings || null,
+      alignments: loaded.alignments || {},
+      alignment_failures: loaded.alignment_failures || {},
     };
     $("mode").value = project.mode;
     $("interval").value = project.interval;
@@ -991,41 +1052,104 @@ window.addEventListener("beforeunload", (e) => {
   renderFrame();
 })();
 
-$("align").onclick = async () => {
-  if (project.mode !== "sequence" || index === 0 || !project.wells.length)
+async function alignFrames(entireSequence) {
+  if (
+    project.mode !== "sequence" ||
+    !project.wells.length ||
+    files.length < 2 ||
+    (!entireSequence && index === 0)
+  )
     return status(
-      "Select a later sequence frame and define wells on the first frame.",
+      "Define wells on the first frame, then select a later sequence frame or align the entire sequence.",
     );
+  const targets = entireSequence ? files.map((_, i) => i).slice(1) : [index];
+  const baseWells = project.wells.map((w) => ({
+    id: w.uid,
+    points: C.geometry(w, 0),
+  }));
   stop();
+  cancelled = false;
   setBusy(true);
+  $("progress").max = targets.length;
+  $("progress").value = 0;
+  const failed = [];
+  let completed = 0;
   try {
-    const form = new FormData();
-    form.append("reference", files[0]);
-    form.append("image", files[index]);
-    form.append(
-      "wells",
-      JSON.stringify(
-        project.wells.map((w) => ({ id: w.uid, points: C.geometry(w, 0) })),
-      ),
+    for (const frame of targets) {
+      if (cancelled) break;
+      try {
+        const form = new FormData();
+        form.append("reference", files[0]);
+        form.append("image", files[frame]);
+        form.append("wells", JSON.stringify(baseWells));
+        const data = await post("/api/align", form);
+        if (cancelled) break;
+        for (const item of data.wells) {
+          const w = project.wells.find((w) => w.uid === item.id);
+          w.overrides[frame] = item.points;
+          w.review_frames = [...new Set([...(w.review_frames || []), frame])];
+          invalidate(w.uid, frame);
+        }
+        const metrics = {
+          method: data.method,
+          inlier_ratio: data.inlier_ratio,
+          median_error_px: data.median_error_px,
+          p95_error_px: data.p95_error_px,
+          reference_frame: 0,
+          working_image_size: data.working_image_size,
+        };
+        project.alignments ??= {};
+        project.alignments[frame] = metrics;
+        delete project.alignment_failures?.[frame];
+        history("align-frame", { frame, metrics, wells: data.wells });
+        completed++;
+      } catch (error) {
+        failed.push({ frame, error: error.message });
+        project.alignment_failures ??= {};
+        project.alignment_failures[frame] = {
+          error: error.message,
+          reference_frame: 0,
+        };
+        delete project.alignments?.[frame];
+        project.wells.forEach((w) => {
+          w.review_frames = [...new Set([...(w.review_frames || []), frame])];
+          invalidate(w.uid, frame);
+        });
+        history("alignment-failed", { frame, error: error.message });
+      }
+      $("progress").value++;
+    }
+    status(
+      `${cancelled ? "Alignment cancelled" : "Alignment finished"}: ${completed} frames aligned from the first-frame template; ${failed.length} failures.${failed.length ? " Review failed frames: " + failed.map((f) => `${f.frame + 1} (${f.error})`).join("; ") : ""} Inspect each frame and confirm its proposed boundaries. Identities were retained.`,
     );
-    const data = await post("/api/align", form);
-    data.wells.forEach((item) => {
-      const w = project.wells.find((w) => w.uid === item.id);
-      w.overrides[index] = item.points;
-      w.review_frames = [...new Set([...(w.review_frames || []), index])];
-      invalidate(w.uid, index);
-      history("align-boundary", {
-        uid: w.uid,
-        frame: index,
-        points: item.points,
-        inlier_ratio: data.inlier_ratio,
-      });
-    });
-    status(data.warning);
-  } catch (e) {
-    status(e.message);
   } finally {
     setBusy(false);
     renderFrame();
   }
+}
+$("align").onclick = () => alignFrames(false);
+$("alignSequence").onclick = () => alignFrames(true);
+$("clearRegion").onclick = () => {
+  project.detection_region = null;
+  history("clear-detection-region", {});
+  draw();
+};
+$("confirmFrame").onclick = () => {
+  if (!project.wells.length) return status("Select wells first.");
+  if (
+    !confirm(
+      "Confirm the visible boundaries on this frame? Confirming the shared template also applies to frames without overrides.",
+    )
+  )
+    return;
+  project.wells.forEach((w) => {
+    w.detection.review_required = false;
+    w.review_frames = (w.review_frames || []).filter((f) => f !== index);
+  });
+  history("confirm-frame-boundaries", { frame: index });
+  updateDetails();
+  draw();
+  status(
+    `Frame ${index + 1} boundaries confirmed. Other alignment proposals still require review.`,
+  );
 };

@@ -24,6 +24,32 @@ def scene():
 
 
 class DetectionVariations(unittest.TestCase):
+    def test_anisotropic_staggered_spacing_keeps_corner_wells(self):
+        image=np.zeros((650,900),np.uint8)
+        expected=[]
+        for row in range(8):
+            for col in range(7 if row%2==0 else 6):
+                x,y=80+col*110+(row%2)*55,90+row*65
+                expected.append(np.array([x,y]));cv2.circle(image,(x,y),26,220,2)
+        self.check(image,expected,52)
+
+    def test_concave_non_circular_boundary_is_preserved(self):
+        image=np.zeros((500,700),np.uint8)
+        polygon=np.int32([[60,70],[230,70],[230,130],[130,130],[130,260],[60,260]])
+        cv2.polylines(image,[polygon],True,255,4)
+        result=detect_wells(cv2.imencode('.png',image)[1].tobytes(),method='contours')
+        self.assertEqual(len(result['wells']),1)
+        self.assertEqual(result['wells'][0]['source'],'simple-contour-proposal')
+        boundary=np.float32(result['wells'][0]['points'])*[700,500]
+        self.assertFalse(cv2.isContourConvex(boundary.astype(np.float32).reshape(-1,1,2)))
+
+    def test_detection_region_excludes_boundary_proposals(self):
+        image,_=scene()
+        result=detect_wells(cv2.imencode('.png',image)[1].tobytes(),method='grid',diameter=56,region=[.1,.2,.8,.8])
+        self.assertGreater(len(result['wells']),10)
+        self.assertTrue(all(.1<=p[0]<=.8 and .2<=p[1]<=.8 for well in result['wells'] for p in well['points']))
+        with self.assertRaises(ValueError): detect_wells(b'',region=[1,0,0,1])
+
     def check(self,image,expected,diameter=None):
         h,w=image.shape[:2]
         result=detect_wells(cv2.imencode('.png',image)[1].tobytes(),method='grid',diameter=diameter)

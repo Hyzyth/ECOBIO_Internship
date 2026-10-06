@@ -83,6 +83,25 @@ class AppTests(unittest.TestCase):
             'image':(io.BytesIO(blank),'current.png'),'wells':json.dumps(wells)})
         self.assertEqual(response.status_code,400)
 
+    def test_projective_camera_shift(self):
+        rng=np.random.default_rng(74)
+        reference=rng.integers(0,256,(500,700),dtype=np.uint8)
+        reference=cv2.GaussianBlur(reference,(3,3),0)
+        for x,y in rng.integers([20,20],[650,450],size=(180,2)):
+            cv2.circle(reference,(int(x),int(y)),6,255,-1)
+        matrix=np.float64([[1,.07,8],[.02,1,6],[.0001,.00012,1]])
+        current=cv2.warpPerspective(reference,matrix,(700,500))
+        points=[[.2,.2],[.4,.2],[.4,.4],[.2,.4]]
+        encode=lambda image:cv2.imencode('.png',image)[1].tobytes()
+        response=self.client.post('/api/align',data={'reference':(io.BytesIO(encode(reference)),'ref.png'),'image':(io.BytesIO(encode(current)),'current.png'),'wells':json.dumps([{'id':'unchanged','points':points}])})
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertEqual(response.json['method'],'perspective')
+        expected=cv2.perspectiveTransform((np.float32(points)*[700,500]).astype(np.float32).reshape(-1,1,2),matrix)[:,0]
+        actual=np.array(response.json['wells'][0]['points'])*[700,500]
+        self.assertLess(np.max(np.linalg.norm(expected-actual,axis=1)),3)
+        response.request.input_stream.close()
+        response.close()
+
     def test_invalid_image(self):
         self.assertEqual(self.client.post('/api/detect').status_code, 400)
         self.assertEqual(self.client.post('/api/detect',data={'image':(io.BytesIO(b''),'empty.png')}).status_code,400)

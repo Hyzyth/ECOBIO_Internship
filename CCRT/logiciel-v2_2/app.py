@@ -1,5 +1,9 @@
 """Local research UI; trained model adapters are optional."""
 from pathlib import Path
+import cv2
+
+# Bound OpenCV workers; large host CPU counts can slow interactive Hough calls.
+cv2.setNumThreads(2)
 from flask import Flask, jsonify, render_template, request
 from backend.services.detection import detect_wells
 from backend.services.alignment import align_wells
@@ -19,7 +23,7 @@ def detect():
     if not image:
         return jsonify(error='Select an image first.'), 400
     try:
-        return jsonify(detect_wells(image.read(), request.form.get('method','auto'), request.form.get('diameter')))
+        return jsonify(detect_wells(image.read(), request.form.get('method','auto'), request.form.get('diameter'), request.form.get('region')))
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 @app.post('/api/align')

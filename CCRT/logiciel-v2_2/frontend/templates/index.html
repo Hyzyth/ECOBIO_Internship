@@ -87,11 +87,16 @@
         <p class="hint">
           For circular grids, size and spacing filters reduce fixation
           proposals. Set diameter when automatic size estimation is wrong.
-          Non-circular mode proposes convex boundaries for review.
+          Non-circular mode preserves simple contours, including concave shapes.
+          Draw a detection region to exclude hardware.
         </p>
         <button id="detect">Suggest well boundaries</button
         ><button id="align" class="secondary">
           Align current frame to first</button
+        ><button id="alignSequence" class="secondary">
+          Align entire sequence to first</button
+        ><button id="clearRegion" class="secondary">
+          Clear detection region</button
         ><button id="whole" class="secondary">Use full image as one well</button
         ><label
           >Canvas tool<select id="tool">
@@ -100,6 +105,9 @@
               Draw polygon (double-click to finish)
             </option>
             <option value="remove">Remove well (click inside)</option>
+            <option value="region">
+              Set detection region (drag rectangle)
+            </option>
             <option value="vertex">Edit boundary vertices</option>
           </select></label
         ><label
@@ -158,6 +166,9 @@
               removes the selected well.</span
             >
           </div>
+          <button id="confirmFrame" class="secondary">
+            Confirm this frame’s boundaries
+          </button>
           <div class="canvas-wrap">
             <canvas
               id="canvas"

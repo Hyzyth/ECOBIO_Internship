@@ -218,6 +218,34 @@
       throw Error(
         "Select the same image files in the saved order before restoring this project.",
       );
+    if (
+      p.detection_region != null &&
+      (!Array.isArray(p.detection_region) ||
+        p.detection_region.length !== 4 ||
+        !p.detection_region.every(
+          (v) => Number.isFinite(v) && v >= 0 && v <= 1,
+        ) ||
+        p.detection_region[0] >= p.detection_region[2] ||
+        p.detection_region[1] >= p.detection_region[3])
+    )
+      throw Error("Invalid detection region.");
+    if (p.alignments != null) {
+      if (typeof p.alignments !== "object" || Array.isArray(p.alignments))
+        throw Error("Invalid alignment metadata.");
+      for (const [frame, a] of Object.entries(p.alignments))
+        if (
+          !/^\d+$/.test(frame) ||
+          Number(frame) >= frames.length ||
+          !a ||
+          !["similarity", "affine", "perspective"].includes(a.method) ||
+          !Number.isFinite(a.inlier_ratio) ||
+          a.inlier_ratio < 0 ||
+          a.inlier_ratio > 1 ||
+          !Number.isFinite(a.median_error_px) ||
+          a.median_error_px < 0
+        )
+          throw Error("Invalid alignment metadata.");
+    }
     const ids = new Set(),
       names = new Set();
     const validPoints = isSimplePolygon;
