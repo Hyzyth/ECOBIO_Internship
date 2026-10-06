@@ -169,3 +169,17 @@ test("project restore preserves valid regions and rejects invalid registration m
   p.alignments[1].inlier_ratio = 2;
   assert.throws(() => C.validateProject(p, p.frames));
 });
+test("partial boundary status survives export/restore and appears in CSV", () => {
+  const p = project();
+  p.wells[0].detection.partial = true;
+  p.wells[0].partial_frames = { 1: false, 2: true };
+  const saved = C.exportProject(p);
+  assert.deepEqual(
+    saved.results.map((r) => r.boundary_partial),
+    [true, false, true, true],
+  );
+  assert.match(C.csv(p), /boundary_partial/);
+  C.validateProject(saved, p.frames);
+  saved.wells[0].partial_frames[2] = "false";
+  assert.throws(() => C.validateProject(saved, p.frames), /partial boundary/);
+});

@@ -35,7 +35,7 @@ const fs = require("node:fs"),
   await page.waitForFunction(() => image !== null);
   await page.locator("#detect").click();
   await page.waitForFunction(
-    () => !busy && document.querySelector("#wellSelect").options.length === 73,
+    () => !busy && document.querySelector("#wellSelect").options.length === 79,
   );
   const ids = await page
     .locator("#proposalSelect option")
@@ -53,6 +53,8 @@ const fs = require("node:fs"),
     () => !busy && document.querySelector("#wellSelect").options.length === 73,
   );
   await page.locator("#clearRegion").click();
+  await page.locator("#detect").click();
+  await page.waitForFunction(() => !busy && project.wells.length === 78);
   const referenceIds = await page
     .locator("#proposalSelect option")
     .evaluateAll((options) => options.slice(1).map((o) => o.value));
@@ -91,8 +93,8 @@ const fs = require("node:fs"),
   await download.saveAs(projectPath);
   const saved = JSON.parse(fs.readFileSync(projectPath, "utf8"));
   assert.equal(saved.frames.length, 5);
-  assert.equal(saved.wells.length, 72);
-  assert.equal(saved.results.length, 360);
+  assert.equal(saved.wells.length, 78);
+  assert.equal(saved.results.length, 390);
   assert.equal(Object.keys(saved.alignments).length, 4);
   assert.ok(
     Object.values(saved.alignments).every(
@@ -120,7 +122,7 @@ const fs = require("node:fs"),
       .querySelector("#status")
       .textContent.startsWith("Project restored"),
   );
-  assert.equal(await page.locator("#proposalSelect option").count(), 73);
+  assert.equal(await page.locator("#proposalSelect option").count(), 79);
   let alignmentCalls = 0;
   await page.route("**/api/align", async (route) => {
     alignmentCalls++;
@@ -168,17 +170,33 @@ const fs = require("node:fs"),
   await page.unroute("**/api/align");
   await page.locator("#mode").selectOption("single");
   await page.locator("#layout").selectOption("individual");
-  for (const [folder, file] of [
-    ["coma", "1.png"],
-    ["awake", "2.png"],
-  ]) {
+  for (const [folder, file] of ["coma", "awake"].flatMap((folder) =>
+    fs
+      .readdirSync(path.join(root, folder))
+      .filter((file) => file.endsWith(".png"))
+      .map((file) => [folder, file]),
+  )) {
     await page.locator("#files").setInputFiles(path.join(root, folder, file));
     await page.waitForFunction(
       () =>
         image !== null &&
-        document.querySelector("#frameCounter").textContent === "1 / 1",
+        document.querySelector("#frameCounter").textContent === "1 / 1" &&
+        !busy &&
+        project.wells.length === 1 &&
+        project.wells[0].detection.source === "single-rim-proposal",
     );
     assert.equal(await page.locator("#proposalSelect option").count(), 2);
+    const rim = await page.evaluate(() => project.wells[0]);
+    assert.ok(
+      rim.points.length > 20,
+      "Rim polygon, not a full-image rectangle",
+    );
+    assert.ok(
+      Math.max(...rim.points.map((p) => p[0])) -
+        Math.min(...rim.points.map((p) => p[0])) >
+        0.7,
+    );
+    await page.screenshot({ path: path.join(output, `${folder}-${file}.png`) });
     assert.match(await page.locator("#prediction").textContent(), /UNKNOWN/);
     await page.locator("#correction").selectOption(folder);
     await page.locator("#saveCorrection").click();
@@ -194,7 +212,7 @@ const fs = require("node:fs"),
   assert.deepEqual(errors, []);
   await browser.close();
   console.log(
-    "PASS real browser: 72 wells, ROI, 4 frame alignments, stable IDs, bulk frame review, 360 unknown-state records, export/restore, coma/awake manual crops, failed alignment preserves IDs and requires review. Artifacts:",
+    "PASS real browser: 78 wells (6 clipped), ROI, 4 frame alignments, stable IDs, bulk frame review, 390 unknown-state records, export/restore, automatic rim detection on all 14 coma/awake crops, failed alignment preserves IDs and requires review. Artifacts:",
     output,
   );
 })().catch((e) => {

@@ -64,3 +64,34 @@ class DetectionVariations(unittest.TestCase):
         image,expected=scene()
         image=cv2.resize(image,None,fx=2,fy=2)
         self.check(image,[p*2 for p in expected],112)
+
+    def test_partial_grid_wells_have_valid_clipped_boundaries(self):
+        from backend.services.geometry import is_simple_polygon
+        image=np.zeros((410,600),np.uint8)
+        for y in (80,160,240,320,400):
+            for x in (80,160,240,320,400,480):
+                cv2.circle(image,(x,y),29,220,3)
+        result=detect_wells(cv2.imencode('.png',image)[1].tobytes(),method='grid',diameter=58)
+        self.assertEqual(len(result['wells']),30)
+        self.assertEqual(sum(w['partial'] for w in result['wells']),6)
+        self.assertTrue(all(is_simple_polygon(w['points']) for w in result['wells']))
+
+    def test_single_rim_including_clipped_rim_and_no_rectangle_fallback(self):
+        from backend.services.geometry import is_simple_polygon
+        for y in (125,145):
+            image=np.full((250,250),120,np.uint8)
+            cv2.circle(image,(125,y),112,210,3)
+            cv2.ellipse(image,(125,150),(12,25),30,0,360,30,-1)
+            wells=detect_wells(cv2.imencode('.png',image)[1].tobytes(),layout='individual')['wells']
+            self.assertEqual(len(wells),1)
+            self.assertTrue(is_simple_polygon(wells[0]['points']))
+            self.assertGreater(len(wells[0]['points']),20)
+            self.assertEqual(wells[0]['partial'],y==145)
+        blank=np.full((250,250),120,np.uint8)
+        self.assertEqual(detect_wells(cv2.imencode('.png',blank)[1].tobytes(),layout='individual')['wells'],[])
+
+    def test_single_non_circular_contour(self):
+        image=np.zeros((250,250),np.uint8)
+        cv2.rectangle(image,(35,35),(215,215),220,3)
+        wells=detect_wells(cv2.imencode('.png',image)[1].tobytes(),layout='individual',method='contours')['wells']
+        self.assertEqual(len(wells),1)

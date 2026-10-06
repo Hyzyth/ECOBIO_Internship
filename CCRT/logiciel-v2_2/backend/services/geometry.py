@@ -32,3 +32,25 @@ def is_simple_polygon(points):
             if intersects(a,b,points[j],points[(j+1)%n]):
                 return False
     return abs(area)>eps
+
+
+def clip_polygon(points):
+    """Intersect a convex boundary with the normalized image rectangle.
+
+    Concave polygons entirely inside remain untouched; ambiguous clipped
+    concave shapes require manual correction rather than joining components.
+    """
+    if is_simple_polygon(points):
+        return points
+    import cv2
+    import numpy as np
+    polygon = np.asarray(points, dtype=np.float32)
+    if polygon.ndim != 2 or polygon.shape[1] != 2 or not np.isfinite(polygon).all():
+        return []
+    if not cv2.isContourConvex(polygon.reshape(-1, 1, 2)):
+        return []
+    _, clipped = cv2.intersectConvexConvex(polygon, np.float32([[0,0],[1,0],[1,1],[0,1]]))
+    if clipped is None:
+        return []
+    result = np.clip(clipped[:,0,:], 0, 1).astype(float).tolist()
+    return result if is_simple_polygon(result) else []
