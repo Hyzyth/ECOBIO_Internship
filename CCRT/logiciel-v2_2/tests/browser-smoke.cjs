@@ -47,7 +47,7 @@ for i in [1,2,10]:
   );
   await page.locator("#confirm").click();
   await page.locator("#correction").selectOption("coma");
-  await page.locator("#eggCount").fill("3");
+  assert.equal(await page.locator("#eggCount").isVisible(), false);
   await page.locator("#notes").fill("Observed manually");
   await page.locator("#saveCorrection").click();
   assert.match(await page.locator("#prediction").textContent(), /COMA/);
@@ -68,7 +68,7 @@ for i in [1,2,10]:
     1,
   );
   assert.equal(p.results[1].prediction, "unknown");
-  assert.equal(p.results[1].user_correction.egg_count, 3);
+  assert.equal(p.results[1].user_correction.egg_count, null);
   await page.locator("#wellName").fill("A3");
   await page.locator("#wellName").press("Tab");
   await page.locator("#tool").selectOption("vertex");

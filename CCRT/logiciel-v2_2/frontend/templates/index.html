@@ -6,22 +6,36 @@
     <title>FlyScope · Experimental review</title>
     <link rel="stylesheet" href="/static/styles.css" />
     <script defer src="/static/review-core.js"></script>
+    <script defer src="/static/training-export.js"></script>
     <script defer src="/static/review.js"></script>
   </head>
-  <body>
+  <body data-study="{{ study }}">
     <header>
       <div>
         <span class="eyebrow">ECOBIO / EXPERIMENTAL WORKSPACE</span>
-        <h1>FlyScope <small>Coma recovery & egg studies</small></h1>
+        <h1>
+          FlyScope
+          <small
+            >{{ 'CCRT / coma recovery' if study == 'ccrt' else 'Egg counting'
+            }}</small
+          >
+        </h1>
       </div>
-      <span class="badge">Model-independent review</span>
+      <nav aria-label="Study">
+        <a href="/ccrt" aria-current="{{ 'page' if study == 'ccrt' else 'false' }}">CCRT</a>
+        <a href="/eggs" aria-current="{{ 'page' if study == 'eggs' else 'false' }}">Egg counting</a>
+      </nav>
     </header>
     <main>
       <aside>
         <h2>01 / Input</h2>
         <label
           >Analysis mode<select id="mode">
+            {% if study == 'ccrt' %}
             <option value="sequence">Ordered sequence</option>
+            {% else %}
+            <option value="batch">Independent image collection</option>
+            {% endif %}
             <option value="single">Single image / Non-sequential</option>
           </select></label
         ><button id="browse">Browse image folder</button
@@ -43,12 +57,12 @@
           Images stay in your browser. Detection and model analysis send the
           current image to the local server.
         </p>
-        <label
-          >Sequence ordering<select id="order">
+        <label data-multiple
+          >File ordering<select id="order">
             <option value="name">Filename timestamp / natural filename</option>
             <option value="modified">File modification time</option>
           </select></label
-        ><label
+        ><label data-sequence
           >Frame interval (seconds)<input
             id="interval"
             type="number"
@@ -56,16 +70,25 @@
             step="0.1"
             value="1"
         /></label>
-        <p class="hint">
+        <p class="hint" data-sequence>
           Confirm ordering in the frame list. Duration summaries use this
           interval; filenames supply optional timestamps, without an assumed
           timezone.
         </p>
-        <details>
-          <summary>Frame order</summary>
+        <details data-multiple>
+          <summary>Image order</summary>
           <ol id="frameList"></ol>
         </details>
-        <h2>02 / Wells</h2>
+        <label
+          >Experiment / split group<input
+            id="experiment"
+            placeholder="e.g. cold-recovery-2026-10-06-run1"
+        /></label>
+        <p class="hint">
+          Use the same experiment ID for related images. Training exports keep
+          this group together to help avoid train/test leakage.
+        </p>
+        <h2>02 / {{ 'Wells' if study == 'ccrt' else 'Regions' }}</h2>
         <label
           >Image layout<select id="layout">
             <option value="grid">Full grid / multiple wells</option>
@@ -84,16 +107,16 @@
             min="1"
             placeholder="Automatic"
         /></label>
-        <p class="hint">
+        <p class="hint" id="detectionHint">
           For circular grids, size and spacing filters reduce fixation
           proposals. Set diameter when automatic size estimation is wrong.
           Non-circular mode preserves simple contours, including concave shapes.
           Draw a detection region to exclude hardware.
         </p>
         <button id="detect">Suggest well boundaries</button
-        ><button id="align" class="secondary">
+        ><button data-sequence id="align" class="secondary">
           Align current frame to first</button
-        ><button id="alignSequence" class="secondary">
+        ><button data-sequence id="alignSequence" class="secondary">
           Align entire sequence to first</button
         ><button id="clearRegion" class="secondary">
           Clear detection region</button
@@ -110,7 +133,7 @@
             </option>
             <option value="vertex">Edit boundary vertices</option>
           </select></label
-        ><label
+        ><label data-sequence
           >Edit scope<select id="scope">
             <option value="frame">Current frame (alignment correction)</option>
             <option value="all">Shared boundary across frames</option>
@@ -118,7 +141,7 @@
         ><label
           ><input id="mask" type="checkbox" checked /> Mask outside wells</label
         >
-        <p class="hint">
+        <p class="hint" data-ccrt>
           Shapes use normalized coordinates. Camera alignment proposes
           frame-specific corrections; review them or edit manually. Identities
           remain stable. Detection is a proposal, not an occupancy estimate.
@@ -130,8 +153,20 @@
         ><progress id="progress" value="0" max="1" hidden></progress
         ><button id="cancel" class="secondary" hidden>Cancel analysis</button>
         <h2>04 / Save</h2>
-        <button id="json">Export JSON / project</button
-        ><button id="csv" class="secondary">Export CSV</button
+        <button id="report">
+          Export {{ 'CCRT' if study == 'ccrt' else 'egg-count' }} report ZIP</button
+        ><button id="training" class="secondary">
+          Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP
+        </button>
+        <p class="hint">
+          Reports include readable results, summaries and a numbered location
+          map. Training datasets include original images, masked crops,
+          annotations and a Python loader. Only manual labels become training
+          targets; uncertain, partial or unreviewed cases remain flagged for
+          review.
+        </p>
+        <button id="json" class="secondary">Save project backup JSON</button
+        ><button id="csv" class="secondary">Export readable results CSV</button
         ><button id="importButton" class="secondary">
           Restore JSON project</button
         ><input id="import" type="file" accept="application/json" hidden />
@@ -147,14 +182,14 @@
         <div class="panel">
           <div class="panel-title">
             <h2>Image workspace</h2>
-            <span class="legend"
+            <span data-ccrt class="legend"
               ><i class="coma"></i> Coma <i class="awake"></i> Awake
-              <i class="unknown"></i> Unknown</span
+              <i class="unknown"></i> Uncertain / unlabeled</span
             >
           </div>
           <div class="proposal-tools">
             <label
-              >Detected / drawn wells<select id="proposalSelect">
+              >{{ 'Detected / drawn wells' if study == 'ccrt' else 'Counting regions on this image' }}<select id="proposalSelect">
                 <option value="">Select a well</option>
               </select></label
             >
@@ -166,6 +201,11 @@
               removes the selected well.</span
             >
           </div>
+          <p class="hint" id="reviewGuide">
+            Define wells on the first frame; keep their IDs, align or edit each
+            later frame, confirm its boundaries, then annotate states. Training
+            exports use that frame's boundary, not screenshots.
+          </p>
           <button id="confirmFrame" class="secondary">
             Confirm this frame’s boundaries
           </button>
@@ -179,9 +219,9 @@
             ></canvas>
             <p id="empty">Load images, then detect or draw well boundaries.</p>
           </div>
-          <div class="controls">
+          <div class="controls" data-multiple>
             <button id="previous" aria-label="Previous frame">←</button
-            ><button id="play">Play</button
+            ><button data-sequence id="play">Play</button
             ><button id="next" aria-label="Next frame">→</button
             ><input
               id="timeline"
@@ -191,7 +231,7 @@
               value="0"
               aria-label="Timeline"
             /><span id="frameCounter">0 / 0</span
-            ><label
+            ><label data-sequence
               >FPS<input
                 id="speed"
                 type="number"
@@ -207,14 +247,14 @@
         </div>
         <div class="panel">
           <div class="panel-title">
-            <h2>Selected well</h2>
+            <h2>{{ 'Selected well' if study == 'ccrt' else 'Selected counting region' }}</h2>
             <select id="wellSelect" aria-label="Select well">
               <option value="">No well selected</option>
             </select>
           </div>
           <div class="editor">
             <label
-              >Well identity<input id="wellName" placeholder="e.g. A3" /></label
+              >{{ 'Well identity' if study == 'ccrt' else 'Region identity' }}<input id="wellName" placeholder="e.g. A3" /></label
             ><label
               >Occupancy<select id="occupancy">
                 <option value="unknown">Unknown</option>
@@ -226,16 +266,17 @@
             ><button id="confirm" class="secondary">Confirm boundary</button
             ><button id="delete" class="danger">Delete well</button>
           </div>
+          <p id="wellProgress" class="hint" data-sequence></p><div class="quick-labels" data-sequence><button id="nextBoundary" class="secondary">Next unreviewed boundary</button><button id="nextLabel" class="secondary">Next unlabeled frame</button></div>
           <div id="prediction">No well selected.</div>
           <div class="editor">
-            <label
+            <label data-ccrt
               >Manual state<select id="correction">
                 <option value="">No override</option>
                 <option value="coma">Coma</option>
                 <option value="awake">Awake</option>
                 <option value="unknown">Unknown / uncertain</option>
               </select></label
-            ><label
+            ><label data-eggs
               >Manual egg count<input
                 id="eggCount"
                 type="number"
@@ -251,16 +292,63 @@
               Clear annotation
             </button>
           </div>
+          <div class="range-labels" data-ccrt>
+            <div class="quick-labels">
+              <button id="labelComa" class="state-coma">
+                Coma — this frame</button
+              ><button id="labelAwake" class="state-awake">
+                Awake — this frame</button
+              ><button id="labelUncertain" class="secondary">
+                Uncertain — this frame
+              </button>
+            </div>
+            <div class="quick-labels" data-sequence>
+              <button id="comaUntil" class="state-coma">
+                Coma through this frame</button
+              ><button id="awakeFrom" class="state-awake">
+                Awake from this frame onward
+              </button>
+            </div>
+            <div class="editor" data-sequence>
+              <label
+                >From frame<input
+                  id="rangeStart"
+                  type="number"
+                  min="1"
+                  value="1" /></label
+              ><label
+                >Through frame (inclusive)<input
+                  id="rangeEnd"
+                  type="number"
+                  min="1"
+                  value="1" /></label
+              ><label
+                >Range state<select id="rangeState">
+                  <option value="coma">Coma</option>
+                  <option value="awake">Awake</option>
+                  <option value="unknown">Uncertain</option>
+                </select></label
+              ><button id="applyRange">Label range</button>
+            </div>
+            <button id="undoLabels" class="secondary" disabled>
+              Undo last range / quick label
+            </button>
+            <p class="hint">
+              Range endpoints are inclusive. Existing manual labels require
+              confirmation before replacement. Mark ambiguous transition frames
+              uncertain.
+            </p>
+          </div>
           <div class="previews">
-            <figure>
+            <figure data-sequence>
               <figcaption>T−1</figcaption>
               <canvas id="prevCrop" width="260" height="180"></canvas>
             </figure>
             <figure>
-              <figcaption>T</figcaption>
+              <figcaption id="currentCaption">Current image</figcaption>
               <canvas id="crop" width="260" height="180"></canvas>
             </figure>
-            <figure>
+            <figure data-sequence>
               <figcaption>T+1</figcaption>
               <canvas id="nextCrop" width="260" height="180"></canvas>
             </figure>
@@ -268,12 +356,12 @@
         </div>
         <div class="panel">
           <div class="panel-title">
-            <h2>Sequence summary</h2>
+            <h2 id="summaryTitle">Analysis summary</h2>
             <span class="hint">Effective states include manual overrides</span>
           </div>
           <div class="table-wrap">
             <table>
-              <thead>
+              <thead id="summaryHead">
                 <tr>
                   <th>Well</th>
                   <th>Frames</th>
@@ -288,10 +376,10 @@
               <tbody id="summary"></tbody>
             </table>
           </div>
-          <p class="hint">
+          <p class="hint" data-sequence>
             Time = classified frame count × confirmed interval. Unknown frames
-            interrupt transitions. Single-image mode reports counts only.
-            Occupancy and egg counts remain separate annotations.
+            interrupt transitions. Single-image mode reports counts only. Labels
+            remain distinct from model predictions.
           </p>
         </div>
       </section>

@@ -1,10 +1,14 @@
 "use strict";
 const C = ReviewCore,
   $ = (id) => document.getElementById(id),
-  colors = { coma: "#f57581", awake: "#78dac0", unknown: "#9cacc1" };
+  colors = { coma: "#ff304f", awake: "#00ec57", unknown: "#9cacc1" },
+  study = document.body.dataset.study || "ccrt";
+let lastLabelOperation = null;
 let project = {
     schema_version: 1,
-    mode: "sequence",
+    task: study,
+    experiment_id: crypto.randomUUID(),
+    mode: study === "eggs" ? "batch" : "sequence",
     interval: 1,
     frames: [],
     wells: [],
@@ -26,7 +30,8 @@ let project = {
 const canvas = $("canvas"),
   ctx = canvas.getContext("2d");
 const status = (message) => ($("status").textContent = message);
-const selectedWell = () => project.wells.find((w) => w.uid === selected);
+const visibleWells = () => project.wells.filter((w) => C.activeWell(w, index));
+const selectedWell = () => visibleWells().find((w) => w.uid === selected);
 const record = () => project.records[C.key(index, selected)] || {};
 function history(action, details) {
   project.history.push({ at: new Date().toISOString(), action, ...details });
@@ -55,17 +60,20 @@ function draw() {
     lc.fillStyle = "rgba(5,12,20,.8)";
     lc.fillRect(0, 0, layer.width, layer.height);
     lc.globalCompositeOperation = "destination-out";
-    project.wells.forEach((w) => {
+    visibleWells().forEach((w) => {
       pointsPath(lc, C.geometry(w, index), layer.width, layer.height);
       lc.fill();
     });
     ctx.drawImage(layer, 0, 0);
   }
-  project.wells.forEach((w) => {
+  visibleWells().forEach((w) => {
     const pts = C.geometry(w, index),
       state = C.effective(project.records[C.key(index, w.uid)]);
     pointsPath(ctx, pts, canvas.width, canvas.height);
-    ctx.strokeStyle = colors[state];
+    ctx.strokeStyle = "#07141c";
+    ctx.lineWidth = w.uid === selected ? 8 : 6;
+    ctx.stroke();
+    ctx.strokeStyle = study === "eggs" ? "#ffe000" : colors[state];
     ctx.lineWidth = w.uid === selected ? 5 : 3;
     ctx.setLineDash(
       w.detection.review_required || w.review_frames?.includes(index)
@@ -78,9 +86,16 @@ function draw() {
     ctx.fillStyle = "#07141c";
     const x = pts[0][0] * canvas.width,
       y = pts[0][1] * canvas.height;
-    ctx.fillRect(x, y - 24, ctx.measureText(w.id).width + 14, 24);
+    ctx.fillRect(x, y - 24, ctx.measureText(w.id + " ?").width + 14, 24);
     ctx.fillStyle = colors[state];
-    ctx.fillText(w.id, x + 7, y - 6);
+    ctx.fillText(
+      w.id +
+        (study === "ccrt"
+          ? " " + (state === "coma" ? "C" : state === "awake" ? "A" : "?")
+          : ""),
+      x + 7,
+      y - 6,
+    );
     if (w.uid === selected && $("tool").value === "vertex") {
       ctx.fillStyle = "#f9e7aa";
       pts.forEach((p) => {
@@ -118,6 +133,8 @@ function draw() {
 }
 async function renderFrame() {
   const generation = ++loadGeneration;
+  if (study === "eggs")
+    project.detection_region = project.detection_regions?.[index] || null;
   image = null;
   draw();
   $("empty").hidden = !!files.length;
@@ -135,10 +152,15 @@ async function renderFrame() {
     (alignment
       ? ` · ${alignment.method} alignment · ${(alignment.inlier_ratio * 100).toFixed(1)}% matched-feature inliers · ${alignment.median_error_px.toFixed(2)} px median feature error (resized image)`
       : "");
+  if (!selectedWell()) selected = visibleWells()[0]?.uid || null;
+  updateContext();
   const sequence = project.mode === "sequence";
-  $("analyze").textContent = sequence ? "Analyze sequence" : "Analyze image";
-  ["previous", "next", "play", "timeline", "speed", "jump"].forEach(
-    (id) => ($(id).disabled = !sequence || !files.length || busy),
+
+  ["previous", "next", "timeline", "jump"].forEach(
+    (id) => ($(id).disabled = files.length < 2 || busy),
+  );
+  ["play", "speed"].forEach(
+    (id) => ($(id).disabled = !sequence || files.length < 2 || busy),
   );
   updateDetails();
   if (!files.length) {
@@ -177,7 +199,7 @@ async function previews() {
         !w ||
         f < 0 ||
         f >= files.length ||
-        (project.mode === "single" && j !== 1)
+        (project.mode !== "sequence" && j !== 1)
       ) {
         context.fillStyle = "#8fa8b7";
         context.fillText("No temporal context", 20, 90);
@@ -233,7 +255,7 @@ function updateDetails() {
   for (const id of ["wellSelect", "proposalSelect"]) {
     $(id).replaceChildren(
       new Option("Select a well", ""),
-      ...project.wells.map((w) => new Option(w.id, w.uid)),
+      ...visibleWells().map((w) => new Option(w.id, w.uid)),
     );
     $(id).value = selected || "";
   }
@@ -248,20 +270,54 @@ function updateDetails() {
     "notes",
     "saveCorrection",
     "clearCorrection",
+    "labelComa",
+    "labelAwake",
+    "labelUncertain",
+    "comaUntil",
+    "awakeFrom",
+    "applyRange",
+    "nextBoundary",
+    "nextLabel",
   ].forEach((id) => ($(id).disabled = !w || busy));
   $("wellName").value = w?.id || "";
   $("occupancy").value = w?.occupancy || "unknown";
   $("correction").value = r.correction?.state || "";
   $("eggCount").value = r.correction?.egg_count ?? "";
   $("notes").value = r.correction?.notes || "";
+  $("wellProgress").textContent = w
+    ? `${w.id}: ${project.frames.filter((_, i) => !C.boundaryNeedsReview(w, i)).length} / ${project.frames.length} boundaries reviewed; ${project.frames.filter((_, i) => project.records[C.key(i, w.uid)]?.correction?.state).length} / ${project.frames.length} frames manually labeled.`
+    : "Select a well to review and label its sequence.";
+  $("undoLabels").disabled = busy || !lastLabelOperation;
+  $("rangeStart").max = $("rangeEnd").max = project.frames.length || 1;
   $("prediction").textContent = w
-    ? `${w.id} · ${C.effective(r).toUpperCase()} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""} · Eggs: ${r.correction?.egg_count ?? r.egg_count ?? "Not counted"}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
+    ? `${w.id} · ${study === "ccrt" ? (r.correction?.state === "unknown" ? "UNCERTAIN" : C.effective(r).toUpperCase()) : "EGG COUNT"} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
   renderSummary();
+  updateContext();
 }
 function renderSummary() {
   const body = $("summary");
   body.replaceChildren();
+  if (study === "eggs") {
+    $("summaryHead").innerHTML =
+      "<tr><th>Image</th><th>Regions</th><th>Counted</th><th>Uncounted</th><th>Total counted eggs</th></tr>";
+    C.resultsReport(project).summary.forEach((row) => {
+      const tr = document.createElement("tr");
+      [
+        row.filename,
+        row.regions,
+        row.counted_regions,
+        row.uncounted_regions,
+        row.total_counted_eggs ?? "—",
+      ].forEach((v) => {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.append(td);
+      });
+      body.append(tr);
+    });
+    return;
+  }
   C.summary(project).forEach((s) => {
     const tr = document.createElement("tr");
     [
@@ -322,7 +378,11 @@ function addWell(
     overrides: {},
     detection,
     occupancy: "unknown",
-    review_frames: [],
+    active_frames: study === "eggs" ? [index] : undefined,
+    review_frames:
+      study === "eggs"
+        ? []
+        : project.frames.map((_, i) => i).filter((i) => i !== index),
   });
   history("add-well", { uid, frame: index });
   select(uid);
@@ -362,11 +422,15 @@ async function loadFiles(input) {
     );
   } else
     status(
-      `${files.length} images loaded. Confirm order, interval and well boundaries.`,
+      study === "eggs"
+        ? `${files.length} independent images loaded. Count each image or define its counting regions.`
+        : `${files.length} images loaded. Confirm order, interval and well boundaries.`,
     );
   urls = files.map((f) => URL.createObjectURL(f));
   project = {
     schema_version: 1,
+    task: study,
+    experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
     interval: Number($("interval").value) || 1,
     order: $("order").value,
@@ -386,8 +450,20 @@ async function loadFiles(input) {
   );
   $("inputInfo").textContent =
     `${files.length} image${files.length === 1 ? "" : "s"} selected. No image data is stored on the server.`;
+  lastLabelOperation = null;
+  if (study === "eggs") {
+    for (index = 0; index < files.length; index++)
+      addWell([
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ]);
+    index = 0;
+    selected = visibleWells()[0]?.uid || null;
+  }
   await renderFrame();
-  if ($("layout").value === "individual") await detect();
+  if (study === "ccrt" && $("layout").value === "individual") await detect();
 }
 function moveTo(i) {
   if (busy || !files.length) return;
@@ -420,10 +496,16 @@ function setBusy(value) {
     "interval",
     "wellSelect",
     "mask",
+    "json",
+    "csv",
+    "report",
+    "training",
+    "experiment",
   ].forEach((id) => ($(id).disabled = value));
   $("cancel").hidden = !value;
   $("progress").hidden = !value;
   updateDetails();
+  updateContext();
 }
 async function post(url, form) {
   const response = await fetch(url, { method: "POST", body: form });
@@ -436,7 +518,9 @@ async function detect() {
   if (
     project.wells.length &&
     !confirm(
-      "Replace all well boundaries and annotations with new proposals? Export first to preserve them.",
+      study === "eggs"
+        ? "Replace this image’s regions and annotations? Export first to preserve them."
+        : "Replace all well boundaries and annotations with new proposals? Export first to preserve them.",
     )
   )
     return;
@@ -460,8 +544,12 @@ async function detect() {
       );
       return;
     }
-    project.wells = [];
-    project.records = {};
+    const removed = study === "eggs" ? visibleWells() : project.wells;
+    const removedIDs = new Set(removed.map((w) => w.uid));
+    project.wells = project.wells.filter((w) => !removedIDs.has(w.uid));
+    for (const k of Object.keys(project.records))
+      if (removedIDs.has(k.split(":")[1])) delete project.records[k];
+    lastLabelOperation = null;
     project.detection_settings = data.settings;
     selected = null;
     data.wells.forEach((w) =>
@@ -493,19 +581,20 @@ function invalidate(uid, frame) {
   }
 }
 function saveGeometry(w, points) {
-  if ($("scope").value === "frame") {
+  if ($("scope").value === "frame" || study === "eggs") {
     w.overrides[index] = points;
     invalidate(w.uid, index);
   } else {
     w.points = points;
     w.overrides = {};
+    w.review_frames = project.frames.map((_, i) => i);
     invalidate(w.uid, null);
   }
   if ($("scope").value === "frame")
     w.review_frames = [...new Set([...(w.review_frames || []), index])];
   else {
     w.detection.review_required = true;
-    w.review_frames = [];
+    w.review_frames = project.frames.map((_, i) => i);
   }
   history("edit-boundary", {
     uid: w.uid,
@@ -551,7 +640,7 @@ canvas.addEventListener("pointerdown", (e) => {
     });
     if (distance < 20) drag = { well: w, vertex: nearest, points, start: p };
   } else {
-    const w = [...project.wells].reverse().find((w) => {
+    const w = [...visibleWells()].reverse().find((w) => {
       pointsPath(ctx, C.geometry(w, index), canvas.width, canvas.height);
       return ctx.isPointInPath(p[0] * canvas.width, p[1] * canvas.height);
     });
@@ -619,6 +708,10 @@ function endDrag() {
       drag.pending[3] - drag.pending[1] > 0.01
     ) {
       project.detection_region = drag.pending;
+      if (study === "eggs") {
+        project.detection_regions ??= {};
+        project.detection_regions[index] = drag.pending;
+      }
       history("set-detection-region", { region: drag.pending });
       status(
         "Detection region saved. Only complete boundary proposals inside it will be considered.",
@@ -694,6 +787,8 @@ $("mode").onchange = () => {
     files.length &&
     !confirm("Changing mode clears this review. Export JSON first. Continue?")
   ) {
+    $("experiment").value = project.experiment_id;
+    lastLabelOperation = null;
     $("mode").value = project.mode;
     return;
   }
@@ -706,6 +801,8 @@ $("mode").onchange = () => {
   draft = [];
   project = {
     schema_version: 1,
+    task: study,
+    experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
     interval: Number($("interval").value) || 1,
     order: $("order").value,
@@ -717,6 +814,7 @@ $("mode").onchange = () => {
   $("frameList").replaceChildren();
   $("inputInfo").textContent = "Choose new images for this analysis mode.";
   status("Mode changed. Choose a folder or image files to begin.");
+  lastLabelOperation = null;
   renderFrame();
 };
 $("order").onchange = () => {
@@ -855,8 +953,8 @@ $("saveCorrection").onclick = () => {
   if (count != null && (!Number.isInteger(count) || count < 0))
     return status("Egg count must be a nonnegative whole number.");
   const correction = {
-    state: $("correction").value || null,
-    egg_count: count,
+    state: study === "ccrt" ? $("correction").value || null : null,
+    egg_count: study === "eggs" ? count : null,
     notes: $("notes").value,
     at: new Date().toISOString(),
   };
@@ -915,13 +1013,16 @@ $("analyze").onclick = async () => {
       form.append(
         "wells",
         JSON.stringify(
-          project.wells.map((w) => ({
-            id: w.uid,
-            points: C.geometry(w, i),
-            occupancy: w.occupancy,
-          })),
+          project.wells
+            .filter((w) => C.activeWell(w, i))
+            .map((w) => ({
+              id: w.uid,
+              points: C.geometry(w, i),
+              occupancy: w.occupancy,
+            })),
         ),
       );
+      if (!project.wells.some((w) => C.activeWell(w, i))) continue;
       const data = await post("/api/analyze", form);
       if (cancelled) break;
       data.records.forEach((r) => {
@@ -963,16 +1064,20 @@ function download(name, text, type) {
   a.href = url;
   a.download = name;
   a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 $("json").onclick = () =>
   download(
-    "flyscope-project.json",
+    `flyscope-${study}-project.json`,
     JSON.stringify(C.exportProject(project), null, 2),
     "application/json",
   );
 $("csv").onclick = () =>
-  download("flyscope-results.csv", C.csv(project), "text/csv");
+  download(
+    `flyscope-${study}-results.csv`,
+    C.tableCSV(C.resultsReport(project).results),
+    "text/csv",
+  );
 $("importButton").onclick = () => $("import").click();
 $("import").onchange = async (e) => {
   try {
@@ -982,6 +1087,10 @@ $("import").onchange = async (e) => {
       JSON.parse(await file.text()),
       project.frames,
     );
+    if ((loaded.task || "ccrt") !== study)
+      throw Error(
+        "Open the matching study page before restoring this project.",
+      );
     if (
       project.wells.length &&
       !confirm("Replace this review with the saved project?")
@@ -990,6 +1099,8 @@ $("import").onchange = async (e) => {
     stop();
     project = {
       schema_version: 1,
+      task: study,
+      experiment_id: loaded.experiment_id || crypto.randomUUID(),
       mode: loaded.mode,
       interval: loaded.interval,
       order: loaded.order,
@@ -998,10 +1109,13 @@ $("import").onchange = async (e) => {
       records: loaded.records,
       history: loaded.history || [],
       detection_region: loaded.detection_region || null,
+      detection_regions: loaded.detection_regions || {},
       detection_settings: loaded.detection_settings || null,
       alignments: loaded.alignments || {},
       alignment_failures: loaded.alignment_failures || {},
     };
+    $("experiment").value = project.experiment_id;
+    lastLabelOperation = null;
     $("mode").value = project.mode;
     $("interval").value = project.interval;
     $("order").value = project.order || "name";
@@ -1026,13 +1140,29 @@ window.addEventListener("beforeunload", (e) => {
   try {
     const response = await fetch("/api/models");
     if (!response.ok) throw Error("Model registry unavailable.");
-    models = await response.json();
+    models = (await response.json()).filter(
+      (m) =>
+        m.id === "manual" ||
+        (study === "eggs"
+          ? m.task === "eggs"
+          : ["coma", "ccrt"].includes(m.task)),
+    );
     $("model").replaceChildren(
-      ...models.map((m) => new Option(`${m.name} · ${m.version}`, m.id)),
+      ...models.map(
+        (m) =>
+          new Option(
+            `${m.id === "manual" ? "Manual " + (study === "eggs" ? "egg counting" : "CCRT review") : m.name} · ${m.version}`,
+            m.id,
+          ),
+      ),
     );
     $("model").onchange = () => {
       const m = models.find((m) => m.id === $("model").value);
-      $("modelInfo").textContent = m?.description || "";
+      $("modelInfo").textContent =
+        m?.id === "manual"
+          ? "Manual annotations only; no trained model is available."
+          : m?.description || "";
+      updateContext();
     };
     $("model").onchange();
   } catch (e) {
@@ -1125,6 +1255,7 @@ $("align").onclick = () => alignFrames(false);
 $("alignSequence").onclick = () => alignFrames(true);
 $("clearRegion").onclick = () => {
   project.detection_region = null;
+  if (study === "eggs") delete project.detection_regions?.[index];
   history("clear-detection-region", {});
   draw();
 };
@@ -1132,11 +1263,11 @@ $("confirmFrame").onclick = () => {
   if (!project.wells.length) return status("Select wells first.");
   if (
     !confirm(
-      "Confirm the visible boundaries on this frame? Confirming the shared template also applies to frames without overrides.",
+      "Confirm the visible boundaries on this frame? Other frames still require their own review.",
     )
   )
     return;
-  project.wells.forEach((w) => {
+  visibleWells().forEach((w) => {
     w.detection.review_required = false;
     w.review_frames = (w.review_frames || []).filter((f) => f !== index);
   });
@@ -1147,3 +1278,236 @@ $("confirmFrame").onclick = () => {
     `Frame ${index + 1} boundaries confirmed. Other alignment proposals still require review.`,
   );
 };
+function updateContext() {
+  const sequence = study === "ccrt" && $("mode").value === "sequence",
+    multiple = $("mode").value !== "single";
+  document
+    .querySelectorAll("[data-ccrt],[data-eggs],[data-sequence],[data-multiple]")
+    .forEach((el) => {
+      el.hidden =
+        (el.hasAttribute("data-ccrt") && study !== "ccrt") ||
+        (el.hasAttribute("data-eggs") && study !== "eggs") ||
+        (el.hasAttribute("data-sequence") && !sequence) ||
+        (el.hasAttribute("data-multiple") && !multiple);
+    });
+  document
+    .querySelector(".previews")
+    .classList.toggle("single-preview", !sequence);
+  $("currentCaption").textContent = sequence
+    ? "T — current frame"
+    : "Current image";
+  $("summaryTitle").textContent =
+    study === "eggs"
+      ? "Egg-count summary"
+      : sequence
+        ? "Sequence summary"
+        : "Image summary";
+  $("reviewGuide").textContent =
+    study === "eggs"
+      ? "Each image starts with its own full-image counting region. Count eggs there, or replace it with manually drawn regions. Regions and annotations belong only to that image."
+      : "Draw or correct wells on the first frame. Keep their IDs across the sequence; align or edit later frames and confirm each frame’s boundaries before exporting training data.";
+  $("experiment").value ||= project.experiment_id;
+  $("analyze").textContent =
+    study === "eggs"
+      ? multiple
+        ? "Analyze image collection"
+        : "Analyze image"
+      : sequence
+        ? "Analyze sequence"
+        : "Analyze image";
+  if (study === "eggs") $("scope").value = "frame";
+  $("align").disabled = busy || !sequence || index === 0 || files.length < 2;
+  $("alignSequence").disabled = busy || !sequence || files.length < 2;
+  $("analyze").disabled = busy || $("model").value === "manual";
+  $("analyze").hidden = $("model").value === "manual";
+  $("detectionHint").textContent =
+    $("detectionMethod").value === "contours"
+      ? "Propose non-circular boundaries, including simple concave shapes. Draw or correct boundaries if the rim is open or obscured."
+      : $("layout").value === "individual"
+        ? "Single-well detection fits one dominant rim in a close crop. Draw a boundary or select the full image if no rim is visible."
+        : "Size and repeated-spacing filters reduce fixture proposals. Set a diameter when automatic estimation is wrong, or draw a detection region to exclude hardware.";
+  if (study === "ccrt") {
+    const header = $("summaryHead").querySelectorAll("th");
+    if (header[5]) header[5].hidden = !sequence;
+    document.querySelectorAll("#summary tr").forEach((tr) => {
+      if (tr.children[5]) tr.children[5].hidden = !sequence;
+    });
+  }
+  $("diameter").closest("label").hidden =
+    $("detectionMethod").value === "contours";
+  document
+    .querySelectorAll('a[href="/ccrt"],a[href="/eggs"]')
+    .forEach((a) => a.setAttribute("aria-disabled", String(busy)));
+}
+$("experiment").onchange = () => {
+  const value = $("experiment").value.trim();
+  if (!value) {
+    $("experiment").value = project.experiment_id;
+    return;
+  }
+  project.experiment_id = value;
+  history("set-experiment", { experiment_id: value });
+};
+$("detectionMethod").onchange = updateContext;
+function labelRange(state, first, last) {
+  if (busy || !selectedWell()) return status("Select a well first.");
+  const count = last - first + 1;
+  if (
+    !Number.isInteger(first) ||
+    !Number.isInteger(last) ||
+    first < 0 ||
+    last < first ||
+    last >= files.length
+  )
+    return status("Choose a valid inclusive frame range.");
+  const replacements = Array.from(
+    { length: count },
+    (_, n) => project.records[C.key(first + n, selected)]?.correction?.state,
+  ).filter(Boolean).length;
+  if (
+    replacements &&
+    !confirm(
+      `Label ${selectedWell().id} ${state} on frames ${first + 1}–${last + 1} inclusive? This replaces ${replacements} manual labels.`,
+    )
+  )
+    return;
+  lastLabelOperation = C.applyStateRange(
+    project,
+    selected,
+    first,
+    last,
+    state,
+    $("notes").value,
+  );
+  updateDetails();
+  draw();
+  status(
+    `${selectedWell().id}: ${state} on ${count} frame${count === 1 ? "" : "s"} (${first + 1}–${last + 1}, inclusive).`,
+  );
+}
+$("labelComa").onclick = () => labelRange("coma", index, index);
+$("labelAwake").onclick = () => labelRange("awake", index, index);
+$("labelUncertain").onclick = () => labelRange("unknown", index, index);
+$("comaUntil").onclick = () => labelRange("coma", 0, index);
+$("awakeFrom").onclick = () => labelRange("awake", index, files.length - 1);
+$("applyRange").onclick = () =>
+  labelRange(
+    $("rangeState").value,
+    Number($("rangeStart").value) - 1,
+    Number($("rangeEnd").value) - 1,
+  );
+$("undoLabels").onclick = () => {
+  if (!lastLabelOperation || busy) return;
+  const restored = C.undoStateRange(project, lastLabelOperation);
+  lastLabelOperation = null;
+  updateDetails();
+  draw();
+  status(
+    `Restored ${restored} previous frame labels. Later edits were preserved.`,
+  );
+};
+$("report").onclick = async () => {
+  if (!files.length || !project.wells.length)
+    return status("Load images and define regions before exporting a report.");
+  stop();
+  setBusy(true);
+  cancelled = false;
+  try {
+    const report = C.resultsReport(project),
+      entries = [
+        { name: "report.json", text: JSON.stringify(report, null, 2) },
+        { name: "results.csv", text: C.tableCSV(report.results) },
+        { name: "summary.csv", text: C.tableCSV(report.summary) },
+        { name: "well-locations.csv", text: C.tableCSV(report.well_map) },
+      ];
+    const frames = study === "eggs" ? project.frames.map((_, i) => i) : [0];
+    for (const frame of frames) {
+      if (cancelled) throw Error("Report export cancelled.");
+      entries.push({
+        name: `maps/frame-${String(frame + 1).padStart(6, "0")}.png`,
+        blob: await TrainingExport.locationMap(project, files, frame),
+      });
+    }
+    entries.push({
+      name: "README.txt",
+      text: `FlyScope ${study} results\nresults.csv and report.json contain readable per-image/region results without polygon arrays. summary.csv contains ${study === "eggs" ? "counted-region totals; uncounted regions are explicit, not zero" : "per-well states, durations and transition counts"}. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first frame; IDs stay stable through camera corrections. Save a separate project backup for editable boundaries, model provenance and history. Training datasets are a separate export.\n`,
+    });
+    download(
+      `flyscope-${study}-report.zip`,
+      await TrainingExport.zip(
+        entries,
+        () => {},
+        () => cancelled,
+      ),
+      "application/zip",
+    );
+    status(
+      `${study.toUpperCase()} report exported with readable results, summary and location maps.`,
+    );
+  } catch (error) {
+    status(error.message);
+  } finally {
+    setBusy(false);
+    renderFrame();
+  }
+};
+$("training").onclick = async () => {
+  if (!files.length) return status("Load images first.");
+  stop();
+  cancelled = false;
+  setBusy(true);
+  try {
+    const { blob, manifest } = await TrainingExport.training(
+      project,
+      files,
+      (done, total, phase) => {
+        $("progress").max = total;
+        $("progress").value = done;
+        status(
+          `${phase === "archive" ? "Packing" : "Preparing"} ${study} dataset: ${phase === "archive" ? "file" : "image"} ${done} / ${total}…`,
+        );
+      },
+      () => cancelled,
+    );
+    if (cancelled) throw Error("Training export cancelled.");
+    download(`flyscope-${study}-training.zip`, blob, "application/zip");
+    status(
+      `Training dataset exported: ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. Original images and masked crops included.`,
+    );
+  } catch (error) {
+    status(error.message);
+  } finally {
+    setBusy(false);
+    renderFrame();
+  }
+};
+
+$("layout").onchange = updateContext;
+function nextMissing(kind) {
+  const well = selectedWell();
+  if (!well || busy) return;
+  for (let step = 1; step <= files.length; step++) {
+    const frame = (index + step) % files.length;
+    if (
+      kind === "boundary"
+        ? C.boundaryNeedsReview(well, frame)
+        : !project.records[C.key(frame, well.uid)]?.correction?.state
+    ) {
+      moveTo(frame);
+      return;
+    }
+  }
+  status(
+    kind === "boundary"
+      ? "Every boundary for this well is reviewed."
+      : "Every frame for this well has a manual label.",
+  );
+}
+$("nextBoundary").onclick = () => nextMissing("boundary");
+$("nextLabel").onclick = () => nextMissing("label");
+document.querySelector("nav").addEventListener("click", (e) => {
+  if (busy) {
+    e.preventDefault();
+    status("Finish or cancel the current operation before changing studies.");
+  }
+});

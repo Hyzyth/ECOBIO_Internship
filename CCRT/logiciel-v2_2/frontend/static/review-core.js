@@ -130,6 +130,7 @@
     const rows = [];
     project.frames.forEach((frame, i) =>
       project.wells.forEach((well) => {
+        if (!activeWell(well, i)) return;
         const record = project.records[key(i, well.uid)] || {};
         rows.push({
           frame_number: i + 1,
@@ -165,7 +166,9 @@
       schema_version: 1,
       exported_at: new Date().toISOString(),
       results: rows,
-      summary: summary(project),
+      task: taskOf(project),
+      summary:
+        taskOf(project) === "eggs" ? eggSummary(project) : summary(project),
     };
   }
   function csv(project) {
@@ -211,7 +214,10 @@
       Array.isArray(p.records) ||
       !Number.isFinite(p.interval) ||
       p.interval <= 0 ||
-      !["single", "sequence"].includes(p.mode)
+      !["single", "sequence", "batch"].includes(p.mode) ||
+      (p.task != null && !["ccrt", "eggs"].includes(p.task)) ||
+      (p.mode === "batch" && p.task !== "eggs") ||
+      (p.task === "eggs" && p.mode === "sequence")
     )
       throw Error("Unsupported or invalid project.");
     if (
@@ -232,6 +238,21 @@
         p.detection_region[1] >= p.detection_region[3])
     )
       throw Error("Invalid detection region.");
+    if (p.detection_regions != null) {
+      if (
+        typeof p.detection_regions !== "object" ||
+        Array.isArray(p.detection_regions)
+      )
+        throw Error("Invalid per-image detection regions.");
+      for (const [i, region] of Object.entries(p.detection_regions)) {
+        if (!/^\d+$/.test(i) || Number(i) >= frames.length)
+          throw Error("Invalid per-image detection region index.");
+        validateProject(
+          { ...p, detection_regions: undefined, detection_region: region },
+          frames,
+        );
+      }
+    }
     if (p.alignments != null) {
       if (typeof p.alignments !== "object" || Array.isArray(p.alignments))
         throw Error("Invalid alignment metadata.");
@@ -288,6 +309,15 @@
           ))
       )
         throw Error("Invalid partial boundary metadata.");
+      if (
+        w.active_frames != null &&
+        (!Array.isArray(w.active_frames) ||
+          !w.active_frames.length ||
+          w.active_frames.some(
+            (i) => !Number.isInteger(i) || i < 0 || i >= frames.length,
+          ))
+      )
+        throw Error("Invalid region image membership.");
       Object.entries(w.overrides).forEach(([i, pts]) => {
         if (!/^\d+$/.test(i) || Number(i) >= frames.length || !validPoints(pts))
           throw Error("Invalid frame boundary.");
@@ -315,7 +345,246 @@
     });
     return p;
   }
+  function activeWell(well, frame) {
+    return !well.active_frames || well.active_frames.includes(frame);
+  }
+  function taskOf(project) {
+    return project.task || "ccrt";
+  }
+  function boundaryNeedsReview(well, frame) {
+    return (
+      !!well.detection.review_required || !!well.review_frames?.includes(frame)
+    );
+  }
+  function applyStateRange(project, uid, first, last, state, notes = "") {
+    if (
+      taskOf(project) !== "ccrt" ||
+      !project.wells.some((w) => w.uid === uid) ||
+      !Number.isInteger(first) ||
+      !Number.isInteger(last) ||
+      first < 0 ||
+      last < first ||
+      last >= project.frames.length ||
+      !["coma", "awake", "unknown"].includes(state)
+    )
+      throw Error("Invalid CCRT annotation range.");
+    const operation = {
+      action: "label-range",
+      operation_id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      uid,
+      first_frame: first + 1,
+      last_frame: last + 1,
+      state,
+      changes: [],
+    };
+    for (let i = first; i <= last; i++) {
+      const k = key(i, uid),
+        previous = project.records[k];
+      operation.changes.push({
+        key: k,
+        previous: previous ? structuredClone(previous) : null,
+      });
+      project.records[k] = {
+        ...previous,
+        correction: {
+          ...previous?.correction,
+          state,
+          notes,
+          at: operation.at,
+          operation_id: operation.operation_id,
+          range: { first_frame: first + 1, last_frame: last + 1 },
+        },
+      };
+    }
+    project.history.push(operation);
+    return operation;
+  }
+  function undoStateRange(project, operation) {
+    let restored = 0;
+    for (const change of operation.changes) {
+      if (
+        project.records[change.key]?.correction?.operation_id !==
+        operation.operation_id
+      )
+        continue;
+      const current = { ...project.records[change.key] };
+      if (change.previous?.correction)
+        current.correction = structuredClone(change.previous.correction);
+      else delete current.correction;
+      if (Object.keys(current).length) project.records[change.key] = current;
+      else delete project.records[change.key];
+      restored++;
+    }
+    project.history.push({
+      action: "undo-label-range",
+      at: new Date().toISOString(),
+      operation_id: operation.operation_id,
+      restored,
+    });
+    return restored;
+  }
+  function wellMap(project, frame = 0) {
+    return project.wells
+      .filter((w) => activeWell(w, frame))
+      .map((w) => {
+        const pts = geometry(w, frame),
+          xs = pts.map((p) => p[0]),
+          ys = pts.map((p) => p[1]);
+        return {
+          well_id: w.id,
+          well_uid: w.uid,
+          reference_frame: frame + 1,
+          filename: project.frames[frame]?.name || null,
+          x_percent: +((Math.min(...xs) + Math.max(...xs)) * 50).toFixed(2),
+          y_percent: +((Math.min(...ys) + Math.max(...ys)) * 50).toFixed(2),
+        };
+      });
+  }
+  function eggSummary(project) {
+    return project.frames.map((frame, i) => {
+      const regions = project.wells.filter((w) => activeWell(w, i));
+      const counts = regions
+        .map((w) => {
+          const r = project.records[key(i, w.uid)];
+          return r?.correction?.egg_count ?? r?.egg_count ?? null;
+        })
+        .filter((c) => c != null);
+      return {
+        filename: frame.name,
+        regions: regions.length,
+        counted_regions: counts.length,
+        uncounted_regions: regions.length - counts.length,
+        total_counted_eggs: counts.length
+          ? counts.reduce((a, c) => a + c, 0)
+          : null,
+      };
+    });
+  }
+  function resultsReport(project) {
+    const task = taskOf(project),
+      locations =
+        task === "eggs"
+          ? project.frames.flatMap((_, i) => wellMap(project, i))
+          : wellMap(project);
+    const results = exportProject(project).results.map((r) =>
+      task === "eggs"
+        ? {
+            image_number: r.frame_number,
+            filename: r.filename,
+            region_id: r.well_id,
+            egg_count: r.effective_egg_count,
+            source:
+              r.user_correction?.egg_count != null
+                ? "manual"
+                : r.egg_count != null
+                  ? "model"
+                  : "unannotated",
+            model: r.model,
+            confidence: r.confidence,
+            notes: r.user_correction?.notes || "",
+            boundary_review_required: r.boundary_review_required,
+            boundary_partial: r.boundary_partial,
+          }
+        : {
+            frame_number: r.frame_number,
+            filename: r.filename,
+            timestamp: r.timestamp,
+            elapsed_seconds: r.elapsed_seconds,
+            well_id: r.well_id,
+            state: r.effective_state,
+            source: r.user_correction?.state
+              ? "manual"
+              : r.prediction !== "unknown"
+                ? "model"
+                : "unannotated",
+            model_prediction: r.prediction,
+            model: r.model,
+            confidence: r.confidence,
+            notes: r.user_correction?.notes || "",
+            boundary_review_required: r.boundary_review_required,
+            boundary_partial: r.boundary_partial,
+          },
+    );
+    const summaries = task === "eggs" ? eggSummary(project) : summary(project);
+    return {
+      schema_version: 1,
+      kind: `${task}-results`,
+      experiment_id: project.experiment_id || null,
+      task,
+      mode: project.mode,
+      frame_interval_seconds:
+        project.mode === "sequence" ? project.interval : null,
+      exported_at: new Date().toISOString(),
+      well_map: locations,
+      summary: summaries,
+      results,
+    };
+  }
+  function tableCSV(rows, fields = Object.keys(rows[0] || {})) {
+    const escape = (v) =>
+      `"${(v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)).replaceAll('"', '""').replace(/^[=+@-]/, "'$&")}"`;
+    return [
+      fields.join(","),
+      ...rows.map((row) => fields.map((f) => escape(row[f])).join(",")),
+    ].join("\r\n");
+  }
+  function trainingAnnotations(project) {
+    const task = taskOf(project),
+      annotations = [];
+    project.frames.forEach((frame, i) =>
+      project.wells.forEach((w) => {
+        if (!activeWell(w, i)) return;
+        const correction = project.records[key(i, w.uid)]?.correction;
+        const manual =
+          task === "eggs" ? correction?.egg_count != null : !!correction?.state;
+        if (!manual) return;
+        const partial = w.partial_frames?.[i] ?? !!w.detection.partial,
+          reviewed = !boundaryNeedsReview(w, i);
+        const uncertain = task === "ccrt" && correction.state === "unknown";
+        annotations.push({
+          id: `f${i + 1}-${w.uid}`,
+          frame_index: i,
+          frame_number: i + 1,
+          filename: frame.name,
+          timestamp: frame.timestamp,
+          elapsed_seconds:
+            project.mode === "sequence" ? i * project.interval : null,
+          well_id: w.id,
+          well_uid: w.uid,
+          split_group: project.experiment_id,
+          task,
+          label: task === "eggs" ? correction.egg_count : correction.state,
+          annotation: structuredClone(correction),
+          label_source: "manual",
+          boundary_normalized: geometry(w, i),
+          boundary_reviewed: reviewed,
+          boundary_partial: partial,
+          occupancy: w.occupancy || "unknown",
+          eligible_for_training:
+            reviewed &&
+            !uncertain &&
+            !partial &&
+            !(
+              task === "ccrt" &&
+              ["empty", "multiple", "obscured"].includes(w.occupancy)
+            ),
+        });
+      }),
+    );
+    return annotations;
+  }
+
   const api = {
+    activeWell,
+    taskOf,
+    boundaryNeedsReview,
+    applyStateRange,
+    undoStateRange,
+    wellMap,
+    resultsReport,
+    tableCSV,
+    trainingAnnotations,
     timestamp,
     orderFiles,
     geometry,
