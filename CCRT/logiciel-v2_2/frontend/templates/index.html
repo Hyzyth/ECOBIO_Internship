@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<script src="/static/p5.js"></script>
+	<script src="/static/axios.min.js"></script>
+	<script src="/static/socket.io.min.js"></script>
+
+	<script src="/static/state.js"></script>
+	<script src="/static/p5view.js"></script>
+	<script src="/static/requests.js"></script>
+	<script src="/static/ui.js"></script>
+	<script src="/static/socket.js"></script>
+	<script src="/static/utils.js"></script>
+
+	<link rel="stylesheet" href="/static/styles.css"> 
+	<!-- <link rel="stylesheet"href="/static/pico.min.css"/> -->
+</head>
+
+<body>
+
+	<!-- <div class="container">
+		<h2>Création dossier images</h2>
+
+		<span class="line">
+			<input id="foldervideos_input" type="text" name="path" placeholder="Chemin du dossier général">
+			<button type="submit" onclick="setFolder_videos()">Créer</button>
+		</span>
+
+		<div id="foldervideos_status"></div>
+
+	</div> -->
+
+	<div class="container" style="padding-left: 10px;">
+
+		<h2>Chargement des images</h2>
+
+		<span class="line">
+			<input id="folder_input" type="text" name="path" placeholder="Chemin du dossier images">
+			<button type="submit" onclick="setFolder()">Charger</button>
+		</span>
+
+		<div id="folder_status"></div>
+
+
+		<hr>
+	
+
+		<button onclick="updateCanvas()">actualiser</button>
+		<br>
+		<button onclick="decrementIndex()"><</button>
+		<span id="counter">0/0</span>
+		<button onclick="incrementIndex()">></button>
+		<br>
+		<img id="viewer" style="max-width:50%; display:none;">
+		<div id="p5-container"></div>
+
+
+		<br>
+
+
+		<button onclick="createGrille()">update grille</button>
+		<br>
+		<div id="case"></div>
+		<div id="case-state"></div>
+
+	</div>
+
+
+
+	<div class="container" style="padding-left: 10px;">
+		<h2>Détermination états</h2>
+		<br>
+		<div class="line">
+			<button onclick="getComparaisonsVal()">compas</button>
+			Statut : <p id="compas_status">null</p>
+	        - progress : <p id="compas_prog">0</p>%
+		</div>
+		<br><br>
+		<!-- <button onclick="readCompa()">read compa</button>
+		<br><br> -->
+		<button onclick="updateCompaCase()">update compa case</button>
+		<br>
+		<div id="compa-case"></div>
+		<br><br>
+		<button onclick="decrementIndexSpecial()"><<</button>
+		<button onclick="decrementIndex()"><</button>
+		<button onclick="switchState()">wake up</button>
+		<button onclick="incrementIndex()">></button>
+		<button onclick="incrementIndexSpecial()">>></button>
+		
+		<hr>
+
+		<div class="line">
+			<button onclick="getCnnVal()">cnn</button>
+			Statut : <p id="cnn_status">null</p>
+			- progress : <p id="cnn_prog">0</p>%
+		</div>
+		
+		<hr>
+		
+		<button onclick="downloadResults()">Télécharger les résultats</button>
+	</div>
+
+
+	
+</body>
+</html>

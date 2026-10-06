@@ -1,0 +1,15 @@
+body {
+	display: flex;
+	flex-direction: row;
+}
+
+.containter {
+	display: flex;
+	flex-direction: column;
+}
+
+.line {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+}
