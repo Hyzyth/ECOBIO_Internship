@@ -23,7 +23,7 @@ def detect():
     if not image:
         return jsonify(error='Select an image first.'), 400
     try:
-        return jsonify(detect_wells(image.read(), request.form.get('method','auto'), request.form.get('diameter'), request.form.get('region')))
+        return jsonify(detect_wells(image.read(), request.form.get('method','auto'), request.form.get('diameter'), request.form.get('region'), request.form.get('layout','grid')))
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 @app.post('/api/align')

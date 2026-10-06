@@ -121,6 +121,8 @@ for i in [1,2,10]:
     () => document.querySelector("#frameCounter").textContent === "1 / 1",
   );
   assert.equal(await page.locator("#play").isDisabled(), true);
+  await page.waitForFunction(() => !busy);
+  await page.locator("#whole").click();
   assert.equal(await page.locator("#wellSelect option").count(), 2);
   await page.locator("#correction").selectOption("awake");
   await page.locator("#saveCorrection").click();

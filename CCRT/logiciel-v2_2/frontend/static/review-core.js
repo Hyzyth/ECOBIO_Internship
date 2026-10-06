@@ -150,6 +150,8 @@
             record.correction?.egg_count ?? record.egg_count ?? null,
           well_boundary: geometry(well, i),
           detection: well.detection,
+          boundary_partial:
+            well.partial_frames?.[i] ?? !!well.detection.partial,
           occupancy: well.occupancy || "unknown",
           geometry_override: !!well.overrides?.[i],
           boundary_review_required:
@@ -186,6 +188,7 @@
       "occupancy",
       "geometry_override",
       "boundary_review_required",
+      "boundary_partial",
     ];
     const escape = (v) =>
       `"${(v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v)).replaceAll('"', '""').replace(/^[=+@-]/, "'$&")}"`;
@@ -273,6 +276,18 @@
         throw Error("Invalid well boundaries or duplicate identities.");
       ids.add(w.uid);
       names.add(w.id);
+      if (
+        w.partial_frames != null &&
+        (typeof w.partial_frames !== "object" ||
+          Array.isArray(w.partial_frames) ||
+          Object.entries(w.partial_frames).some(
+            ([i, value]) =>
+              !/^\d+$/.test(i) ||
+              Number(i) >= frames.length ||
+              typeof value !== "boolean",
+          ))
+      )
+        throw Error("Invalid partial boundary metadata.");
       Object.entries(w.overrides).forEach(([i, pts]) => {
         if (!/^\d+$/.test(i) || Number(i) >= frames.length || !validPoints(pts))
           throw Error("Invalid frame boundary.");

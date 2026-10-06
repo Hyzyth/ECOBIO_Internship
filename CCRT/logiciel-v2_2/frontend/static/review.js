@@ -255,7 +255,7 @@ function updateDetails() {
   $("eggCount").value = r.correction?.egg_count ?? "";
   $("notes").value = r.correction?.notes || "";
   $("prediction").textContent = w
-    ? `${w.id} · ${C.effective(r).toUpperCase()} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""} · Eggs: ${r.correction?.egg_count ?? r.egg_count ?? "Not counted"}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}`
+    ? `${w.id} · ${C.effective(r).toUpperCase()} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""} · Eggs: ${r.correction?.egg_count ?? r.egg_count ?? "Not counted"}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
   renderSummary();
 }
@@ -386,21 +386,8 @@ async function loadFiles(input) {
   );
   $("inputInfo").textContent =
     `${files.length} image${files.length === 1 ? "" : "s"} selected. No image data is stored on the server.`;
-  if ($("layout").value === "individual")
-    addWell(
-      [
-        [0, 0],
-        [1, 0],
-        [1, 1],
-        [0, 1],
-      ],
-      {
-        source: "single-image-default",
-        review_required: true,
-        confidence: null,
-      },
-    );
   await renderFrame();
+  if ($("layout").value === "individual") await detect();
 }
 function moveTo(i) {
   if (busy || !files.length) return;
@@ -459,6 +446,10 @@ async function detect() {
     const form = new FormData();
     form.append("image", files[index]);
     form.append("method", $("detectionMethod").value);
+    form.append(
+      "layout",
+      $("layout").value === "individual" ? "individual" : "grid",
+    );
     form.append("diameter", $("diameter").value);
     if (project.detection_region)
       form.append("region", JSON.stringify(project.detection_region));
@@ -478,6 +469,7 @@ async function detect() {
         source: w.source,
         confidence: w.confidence,
         ring_coverage: w.ring_coverage ?? null,
+        partial: w.partial ?? false,
         review_required: true,
       }),
     );
@@ -1087,6 +1079,8 @@ async function alignFrames(entireSequence) {
         for (const item of data.wells) {
           const w = project.wells.find((w) => w.uid === item.id);
           w.overrides[frame] = item.points;
+          w.partial_frames ??= {};
+          w.partial_frames[frame] = !!item.partial || !!w.detection.partial;
           w.review_frames = [...new Set([...(w.review_frames || []), frame])];
           invalidate(w.uid, frame);
         }

@@ -5,7 +5,7 @@ It cannot semantically distinguish a mounting fixture with identical geometry.
 """
 import json
 import cv2
-from backend.services.geometry import is_simple_polygon
+from backend.services.geometry import is_simple_polygon, clip_polygon
 import numpy as np
 
 
@@ -26,12 +26,21 @@ def _circles(gray, diameter=None, region=None):
     found = cv2.HoughCircles(contrast, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
                             minDist=max(10, low * 1.5), param1=250, param2=.8,
                             minRadius=low, maxRadius=high)
-    if found is None:
+    # Partial arcs need a lower Hough threshold, but only admit these extra
+    # candidates at the image edge. Size, rim support and repeated neighbours
+    # still validate them; no unseen lattice locations are invented.
+    border = cv2.HoughCircles(contrast, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
+                             minDist=max(10, low*1.5), param1=250, param2=.5,
+                             minRadius=low, maxRadius=high)
+    candidates_found = [] if found is None else list(found[0])
+    if border is not None:
+        candidates_found.extend(c for c in border[0] if c[0]-c[2]<0 or c[1]-c[2]<0 or c[0]+c[2]>=w or c[1]+c[2]>=h)
+    if not candidates_found:
         return []
     edges = cv2.Canny(contrast, 40, 80)
     angles = np.linspace(0, 2*np.pi, 90, endpoint=False)
     candidates = []
-    for x, y, radius in found[0]:
+    for x, y, radius in candidates_found:
         # Ring coverage suppresses fly bodies/scratches, while allowing gaps.
         covered = np.zeros(len(angles), bool)
         for offset in [-3, -2, -1, 0, 1, 2, 3]:
@@ -40,7 +49,7 @@ def _circles(gray, diameter=None, region=None):
             valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
             covered[valid] |= edges[ys[valid], xs[valid]] > 0
         support = float(covered.mean())
-        if support < .45 or x-radius < 0 or y-radius < 0 or x+radius >= w or y+radius >= h:
+        if support < .45:
             continue
         if region is not None and not (region[0]*w <= x-radius and x+radius <= region[2]*w and region[1]*h <= y-radius and y+radius <= region[3]*h):
             continue
@@ -84,7 +93,41 @@ def _circles(gray, diameter=None, region=None):
     return [c for c,n in zip(group,neighbours) if n >= 2]
 
 
-def _contours(gray):
+def _single_well(gray, diameter=None, region=None):
+    """Find one dominant rim in a close crop, independently of grid repetition.
+
+    Require a large rim near the crop center and evidence on at least half
+    its circumference. No whole-image rectangle is substituted on failure.
+    """
+    h,w = gray.shape
+    contrast=cv2.GaussianBlur(cv2.createCLAHE(2,(8,8)).apply(gray),(5,5),1)
+    low,high=(max(5,int(diameter*.4)),max(6,int(diameter*.6))) if diameter else (int(min(h,w)*.3),int(max(h,w)*.68))
+    found=cv2.HoughCircles(contrast,cv2.HOUGH_GRADIENT_ALT,1.5,max(10,min(h,w)*.3),param1=150,param2=.65,minRadius=low,maxRadius=high)
+    if found is None:
+        return []
+    edges=cv2.Canny(contrast,40,80)
+    angles=np.linspace(0,2*np.pi,180,endpoint=False)
+    candidates=[]
+    for x,y,r in found[0]:
+        if abs(x-w/2)>.25*w or abs(y-h/2)>.25*h:
+            continue
+        covered=np.zeros(len(angles),bool)
+        for offset in range(-3,4):
+            xs=np.rint(x+(r+offset)*np.cos(angles)).astype(int)
+            ys=np.rint(y+(r+offset)*np.sin(angles)).astype(int)
+            valid=(xs>=0)&(xs<w)&(ys>=0)&(ys<h)
+            covered[valid]|=edges[ys[valid],xs[valid]]>0
+        support=float(covered.mean())
+        if support<.5:
+            continue
+        if region and not (region[0]*w<=x-r and x+r<=region[2]*w and region[1]*h<=y-r and y+r<=region[3]*h):
+            continue
+        candidates.append({'x':float(x),'y':float(y),'radius':float(r),'support':support})
+    # Prefer the outer rim over a concentric internal reflection.
+    return sorted(candidates,key=lambda c:c['radius'],reverse=True)[:1]
+
+
+def _contours(gray, single=False):
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, 30, 90)
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -92,7 +135,7 @@ def _contours(gray):
     proposals = []
     for contour in contours:
         area = cv2.contourArea(contour)
-        if not .0005*w*h < area < .12*w*h:
+        if not .0005*w*h < area < (.95 if single else .12)*w*h:
             continue
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
@@ -118,7 +161,9 @@ def _contours(gray):
     return proposals
 
 
-def detect_wells(content, method='auto', diameter=None, region=None):
+def detect_wells(content, method='auto', diameter=None, region=None, layout='grid'):
+    if layout not in ('grid', 'individual'):
+        raise ValueError('Unknown image layout.')
     if region not in (None,''):
         try:
             region=json.loads(region) if isinstance(region,str) else region
@@ -150,19 +195,27 @@ def detect_wells(content, method='auto', diameter=None, region=None):
     small = cv2.resize(image,(max(1,round(w*scale)),max(1,round(h*scale))))
     sh,sw = small.shape[:2]
     gray = cv2.cvtColor(small,cv2.COLOR_BGR2GRAY)
-    circles = _circles(gray,diameter*scale if diameter else None,region) if method!='contours' else []
+    circles = (_single_well(gray, diameter*scale if diameter else None, region) if layout=='individual' else _circles(gray,diameter*scale if diameter else None,region)) if method!='contours' else []
     wells = []
     if circles:
         for c in circles:
             angles = np.linspace(0,2*np.pi,40,endpoint=False)
             points = [[(c['x']+c['radius']*np.cos(a))/sw,(c['y']+c['radius']*np.sin(a))/sh] for a in angles]
-            wells.append({'points':points,'source':'repeated-ring-proposal','review_required':True,
+            partial = not is_simple_polygon(points)
+            points = clip_polygon(points)
+            if not points:
+                continue
+            wells.append({'points':points,'partial':partial,'source':'single-rim-proposal' if layout=='individual' else 'repeated-ring-proposal','review_required':True,
                           'confidence':None,'ring_coverage':c['support']})
-        used = 'grid'
+        used = 'single-rim' if layout=='individual' else 'grid'
     elif method=='grid':
         used = 'grid'
     else:
-        for proposal in _contours(gray):
+        proposals = _contours(gray, single=layout=='individual')
+        if layout=='individual':
+            proposals = [p for p in proposals if min(p['size'])>.5*min(sh,sw) and abs(p['center'][0]-sw/2)<.25*sw and abs(p['center'][1]-sh/2)<.25*sh]
+            proposals = sorted(proposals,key=lambda p:p['size'][0]*p['size'][1],reverse=True)[:1]
+        for proposal in proposals:
             if region is not None and not all(region[0]<=x/sw<=region[2] and region[1]<=y/sh<=region[3] for x,y in proposal['points']):
                 continue
             wells.append({'points':[[x/sw,y/sh] for x,y in proposal['points']],
@@ -180,5 +233,5 @@ def detect_wells(content, method='auto', diameter=None, region=None):
         rows[-1]['wells'].append(well)
     wells=[well for row in rows for well in sorted(row['wells'],key=lambda well:center(well)[0])]
     return {'wells':wells,'width':w,'height':h,'method':used,
-            'settings':{'method':method,'diameter_px':diameter,'region':region},
-            'warning':'Review proposals; no fixed layout or well count is assumed. Complete boundaries only: clipped wells require manual selection. Restrict the detection region to exclude mounting hardware when geometry alone is ambiguous; contour mode preserves simple non-circular/concave boundaries.'}
+            'settings':{'method':method,'diameter_px':diameter,'region':region,'layout':layout},
+            'warning':'Review proposals; no fixed layout or well count is assumed. Partially visible rims are clipped to the image edge and flagged; their complete shape remains unknown. Restrict the detection region to exclude mounting hardware when geometry alone is ambiguous; contour mode preserves simple non-circular/concave boundaries.'}

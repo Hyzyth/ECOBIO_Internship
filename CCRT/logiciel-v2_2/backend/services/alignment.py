@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 from backend.services.model_registry import parse_wells
-from backend.services.geometry import is_simple_polygon
+from backend.services.geometry import is_simple_polygon, clip_polygon
 
 
 def align_wells(reference_bytes, current_bytes, wells_json):
@@ -74,8 +74,10 @@ def align_wells(reference_bytes, current_bytes, wells_json):
         points=np.float32(well['points'])*[reference.shape[1],reference.shape[0]]
         transformed=cv2.perspectiveTransform(points.astype(np.float32).reshape(-1,1,2),matrix)[:,0]
         normalized=(transformed/[current.shape[1],current.shape[0]]).tolist()
-        if not is_simple_polygon(normalized):
-            raise ValueError('A transformed boundary falls outside the frame or becomes invalid. Correct boundaries manually; no partial alignment was saved.')
-        result.append({'id':well['id'],'points':normalized})
+        partial = not is_simple_polygon(normalized)
+        normalized = clip_polygon(normalized)
+        if not normalized:
+            raise ValueError('A transformed boundary is entirely out of view, invalid, or cannot be clipped unambiguously. Correct boundaries manually; no alignment was saved.')
+        result.append({'id':well['id'],'points':normalized,'partial':partial})
     metrics={k:v for k,v in chosen.items() if k not in ('matrix','inliers')}
     return {'wells':result,**metrics,'working_image_size':[current.shape[1],current.shape[0]],'warning':'Alignment proposals retain identities; review boundaries before analysis. Error metrics are measured on matched image features, not biological accuracy.'}

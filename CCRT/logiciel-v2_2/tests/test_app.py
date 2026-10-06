@@ -60,7 +60,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(is_simple_polygon([[0,0],[1,0],[.5,.5],[1,1],[0,1]]))
 
     def test_invalid_detection_settings(self):
-        for setting in [{'diameter':'nan'},{'diameter':'-1'},{'method':'invalid'}]:
+        for setting in [{'diameter':'nan'},{'diameter':'-1'},{'method':'invalid'},{'layout':'invalid'}]:
             response=self.client.post('/api/detect',data={**setting,'image':(io.BytesIO(self.image),'test.png')})
             self.assertEqual(response.status_code,400)
 
@@ -71,13 +71,19 @@ class AppTests(unittest.TestCase):
             cv2.circle(reference,(int(x),int(y)),4,(255,255,255),-1)
         current = cv2.warpAffine(reference,np.float32([[1,0,15],[0,1,10]]),(700,500))
         encode = lambda img: cv2.imencode('.png',img)[1].tobytes()
-        wells = [{'id':'stable-id','points':[[.2,.2],[.4,.2],[.4,.4],[.2,.4]]}]
+        wells = [{'id':'stable-id','points':[[.2,.2],[.4,.2],[.4,.4],[.2,.4]]}, {'id':'edge-id','points':[[.9,.9],[.99,.9],[.99,.99],[.9,.99]]}]
         response = self.client.post('/api/align',data={
             'reference':(io.BytesIO(encode(reference)),'ref.png'),
             'image':(io.BytesIO(encode(current)),'current.png'), 'wells':json.dumps(wells)})
         self.assertEqual(response.status_code,200,response.json)
         self.assertEqual(response.json['wells'][0]['id'],'stable-id')
         self.assertAlmostEqual(response.json['wells'][0]['points'][0][0],.2+15/700,delta=.005)
+        edge=response.json['wells'][1]
+        self.assertEqual(edge['id'],'edge-id')
+        self.assertTrue(edge['partial'])
+        self.assertTrue(is_simple_polygon(edge['points']))
+        self.assertEqual(max(p[0] for p in edge['points']),1)
+        self.assertEqual(max(p[1] for p in edge['points']),1)
         blank=encode(np.zeros_like(reference))
         response=self.client.post('/api/align',data={'reference':(io.BytesIO(blank),'ref.png'),
             'image':(io.BytesIO(blank),'current.png'),'wells':json.dumps(wells)})
