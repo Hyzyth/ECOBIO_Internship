@@ -167,3 +167,77 @@ test("egg project backups contain count summaries and ZIP cancellation stops pac
     /cancelled/,
   );
 });
+test("whole-sequence approval keeps failed frames pending and preserves annotations/geometry", () => {
+  const p = project();
+  p.wells[0].detection.review_required = true;
+  p.wells[0].review_frames = [1, 2];
+  p.alignment_failures = { 2: { error: "weak match" } };
+  C.applyStateRange(p, "well1", 0, 1, "coma");
+  const before = structuredClone(p.records),
+    points = structuredClone(p.wells[0].points);
+  const result = C.approveStableBoundaries(p, ["well1"]);
+  assert.deepEqual(result, { approved: 2, skipped: 1 });
+  assert.deepEqual(p.wells[0].review_frames, [2]);
+  assert.deepEqual(p.records, before);
+  assert.deepEqual(p.wells[0].points, points);
+});
+test("empty occupancy overrides presentation and summary while preserving manual labels", () => {
+  const p = project();
+  C.applyStateRange(p, "well1", 0, 2, "coma");
+  p.wells[0].occupancy = "empty";
+  const s = C.summary(p)[0];
+  assert.equal(s.empty_frames, 3);
+  assert.equal(s.coma_frames, 0);
+  assert.equal(s.unknown_frames, 0);
+  assert.equal(C.resultsReport(p).results[0].state, "empty");
+  assert.equal(C.trainingAnnotations(p)[0].eligible_for_training, false);
+  assert.equal(p.records["0:well1"].correction.state, "coma");
+  p.wells[0].occupancy = "single";
+  assert.equal(C.summary(p)[0].coma_frames, 3);
+});
+test("legacy readable report restores labels onto matched geometry atomically", () => {
+  const p = project();
+  C.applyStateRange(p, "well1", 0, 1, "coma");
+  C.applyStateRange(p, "well1", 2, 2, "awake");
+  const report = C.resultsReport(p),
+    blank = project();
+  const restored = C.importReadableReport(blank, report);
+  assert.equal(restored.imported, 3);
+  assert.deepEqual(C.summary(restored.project)[0].states, [
+    "coma",
+    "coma",
+    "awake",
+  ]);
+  assert.deepEqual(restored.project.wells[0].points, blank.wells[0].points);
+  assert.deepEqual(blank.records, {});
+  report.results[2].filename = "wrong.png";
+  assert.throws(() => C.importReadableReport(blank, report), /images/);
+  assert.deepEqual(blank.records, {});
+  report.results[2].filename = "frame2.png";
+  report.well_map[0].x_percent = 99;
+  assert.throws(
+    () => C.importReadableReport(blank, report),
+    /different position/,
+  );
+});
+test("ZIP report import prefers full project and checks data CRC", async () => {
+  const blob = await Z.zip([
+    { name: "report.json", text: '{"kind":"ccrt-results"}' },
+    { name: "project.json", text: '{"wells":[],"history":["kept"]}' },
+  ]);
+  assert.deepEqual(await Z.readArchiveJSON(blob), {
+    wells: [],
+    history: ["kept"],
+  });
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  bytes[30 + "report.json".length + 2] ^= 1; // Non-selected report does not affect project.
+  assert.equal((await Z.readArchiveJSON(new Blob([bytes]))).history[0], "kept");
+  const view = new DataView(bytes.buffer);
+  let pos = 30 + view.getUint16(26, true) + view.getUint32(18, true);
+  bytes[pos + 30 + "project.json".length + 2] ^= 1;
+  await assert.rejects(() => Z.readArchiveJSON(new Blob([bytes])), /checksum/);
+  const legacy = await Z.zip([
+    { name: "report.json", text: '{"kind":"ccrt-results"}' },
+  ]);
+  assert.equal((await Z.readArchiveJSON(legacy)).kind, "ccrt-results");
+});

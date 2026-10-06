@@ -276,7 +276,124 @@
       manifest,
     };
   }
-  const api = { zip, crc32, png, locationMap, training };
+  async function readArchiveJSON(file) {
+    const tail = new Uint8Array(
+        await file.slice(Math.max(0, file.size - 65557)).arrayBuffer(),
+      ),
+      view = new DataView(tail.buffer);
+    let end = -1;
+    for (let i = tail.length - 22; i >= 0; i--)
+      if (
+        view.getUint32(i, true) === 0x06054b50 &&
+        i + 22 + view.getUint16(i + 20, true) === tail.length
+      ) {
+        end = i;
+        break;
+      }
+    if (end < 0) throw Error("Not a supported ZIP archive.");
+    const count = view.getUint16(end + 10, true),
+      size = view.getUint32(end + 12, true),
+      offset = view.getUint32(end + 16, true);
+    if (
+      view.getUint16(end + 4, true) ||
+      view.getUint16(end + 6, true) ||
+      count === 65535 ||
+      size > 16 * 1024 * 1024 ||
+      offset + size > file.size
+    )
+      throw Error("Unsupported ZIP archive directory.");
+    const dir = new Uint8Array(
+        await file.slice(offset, offset + size).arrayBuffer(),
+      ),
+      dv = new DataView(dir.buffer),
+      decoder = new TextDecoder(),
+      entries = [];
+    let pos = 0;
+    for (let i = 0; i < count; i++) {
+      if (pos + 46 > dir.length || dv.getUint32(pos, true) !== 0x02014b50)
+        throw Error("Invalid ZIP directory.");
+      const nl = dv.getUint16(pos + 28, true),
+        extra = dv.getUint16(pos + 30, true),
+        comment = dv.getUint16(pos + 32, true);
+      if (pos + 46 + nl + extra + comment > dir.length)
+        throw Error("Invalid ZIP entry.");
+      const name = decoder.decode(dir.slice(pos + 46, pos + 46 + nl));
+      if (["project.json", "report.json"].includes(name))
+        entries.push({
+          name,
+          flags: dv.getUint16(pos + 8, true),
+          method: dv.getUint16(pos + 10, true),
+          crc: dv.getUint32(pos + 16, true),
+          compressed: dv.getUint32(pos + 20, true),
+          size: dv.getUint32(pos + 24, true),
+          offset: dv.getUint32(pos + 42, true),
+        });
+      pos += 46 + nl + extra + comment;
+    }
+    const entry =
+      entries.find((e) => e.name === "project.json") ||
+      entries.find((e) => e.name === "report.json");
+    if (!entry)
+      throw Error("Archive contains neither project.json nor report.json.");
+    if (
+      entries.filter((e) => e.name === entry.name).length !== 1 ||
+      entry.flags & 1 ||
+      entry.size > 32 * 1024 * 1024 ||
+      entry.compressed > 32 * 1024 * 1024
+    )
+      throw Error("Unsupported or oversized project metadata.");
+    const header = new DataView(
+      await file.slice(entry.offset, entry.offset + 30).arrayBuffer(),
+    );
+    if (header.byteLength < 30 || header.getUint32(0, true) !== 0x04034b50)
+      throw Error("Invalid ZIP local header.");
+    const start =
+      entry.offset +
+      30 +
+      header.getUint16(26, true) +
+      header.getUint16(28, true);
+    if (start + entry.compressed > offset)
+      throw Error("Invalid ZIP data range.");
+    let bytes = new Uint8Array(
+      await file.slice(start, start + entry.compressed).arrayBuffer(),
+    );
+    if (entry.method === 8) {
+      const reader = new Blob([bytes])
+          .stream()
+          .pipeThrough(new DecompressionStream("deflate-raw"))
+          .getReader(),
+        chunks = [];
+      let total = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > entry.size) {
+          await reader.cancel();
+          throw Error("Invalid expanded ZIP size.");
+        }
+        chunks.push(value);
+      }
+      bytes = new Uint8Array(total);
+      let at = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, at);
+        at += chunk.length;
+      }
+    } else if (entry.method !== 0) throw Error("Unsupported ZIP compression.");
+    if (bytes.length !== entry.size || crc32(bytes) !== entry.crc)
+      throw Error("ZIP metadata checksum failed.");
+    return JSON.parse(decoder.decode(bytes));
+  }
+
+  const api = {
+    readArchiveJSON,
+    zip,
+    crc32,
+    png,
+    locationMap,
+    training,
+  };
   if (typeof module !== "undefined") module.exports = api;
   else root.TrainingExport = api;
 })(globalThis);

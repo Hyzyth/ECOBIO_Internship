@@ -169,7 +169,7 @@
         ><button id="csv" class="secondary">Export readable results CSV</button
         ><button id="importButton" class="secondary">
           Restore JSON project</button
-        ><input id="import" type="file" accept="application/json" hidden />
+        ><input id="import" type="file" accept="application/json" hidden /><button id="importReportButton" class="secondary">Import report / training ZIP or JSON</button><input id="importReport" type="file" accept=".zip,.json,application/zip,application/json" hidden />
         <p class="hint">
           Export before leaving. Restore by selecting the same image files, then
           importing JSON. Images are not embedded.
@@ -184,7 +184,7 @@
             <h2>Image workspace</h2>
             <span data-ccrt class="legend"
               ><i class="coma"></i> Coma <i class="awake"></i> Awake
-              <i class="unknown"></i> Uncertain / unlabeled</span
+              <i class="unknown"></i> Uncertain / unlabeled <i class="empty"></i> Empty</span
             >
           </div>
           <div class="proposal-tools">
@@ -203,9 +203,10 @@
           </div>
           <p class="hint" id="reviewGuide">
             Define wells on the first frame; keep their IDs, align or edit each
-            later frame, confirm its boundaries, then annotate states. Training
+            later frame, approve stable boundaries, then annotate states. Training
             exports use that frame's boundary, not screenshots.
           </p>
+<button id="confirmSequence" data-sequence class="secondary">Approve stable boundaries for entire sequence</button>
           <button id="confirmFrame" class="secondary">
             Confirm this frame’s boundaries
           </button>
@@ -263,7 +264,7 @@
                 <option value="multiple">Multiple individuals</option>
                 <option value="obscured">Obscured / unreliable</option>
               </select></label
-            ><button id="confirm" class="secondary">Confirm boundary</button
+            ><label data-sequence>Boundary approval<select id="boundaryApproval"><option value="sequence">Whole sequence (stable position)</option><option value="frame">Current frame only</option></select></label><button id="confirm" class="secondary">Confirm boundary</button
             ><button id="delete" class="danger">Delete well</button>
           </div>
           <p id="wellProgress" class="hint" data-sequence></p><div class="quick-labels" data-sequence><button id="nextBoundary" class="secondary">Next unreviewed boundary</button><button id="nextLabel" class="secondary">Next unlabeled frame</button></div>
@@ -274,7 +275,7 @@
                 <option value="">No override</option>
                 <option value="coma">Coma</option>
                 <option value="awake">Awake</option>
-                <option value="unknown">Unknown / uncertain</option>
+                <option value="unknown">Unknown / uncertain</option><option value="empty" disabled>Empty — no state applicable</option>
               </select></label
             ><label data-eggs
               >Manual egg count<input
@@ -367,7 +368,7 @@
                   <th>Frames</th>
                   <th>Awake</th>
                   <th>Coma</th>
-                  <th>Unknown</th>
+                  <th>Uncertain / unlabeled / empty</th>
                   <th>Recovery transitions</th>
                   <th>Mean model confidence</th>
                   <th>State timeline</th>

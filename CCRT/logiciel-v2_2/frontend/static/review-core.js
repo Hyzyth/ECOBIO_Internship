@@ -83,7 +83,8 @@
   function geometry(well, frame) {
     return well.overrides?.[frame] || well.points;
   }
-  function effective(record) {
+  function effective(record, well) {
+    if (well?.occupancy === "empty") return "empty";
     return record?.correction?.state || record?.prediction || "unknown";
   }
   function key(frame, well) {
@@ -94,18 +95,21 @@
       let awake = 0,
         coma = 0,
         unknown = 0,
+        empty = 0,
         transitions = 0,
         previous = null,
         confidence = [];
       const states = project.frames.map((_, i) => {
         const r = project.records[key(i, well.uid)],
-          s = effective(r);
+          s = effective(r, well);
         if (s === "awake") awake++;
         else if (s === "coma") coma++;
+        else if (s === "empty") empty++;
         else unknown++;
         if (previous === "coma" && s === "awake") transitions++;
         previous = s;
-        if (r?.confidence != null) confidence.push(r.confidence);
+        if (s !== "empty" && r?.confidence != null)
+          confidence.push(r.confidence);
         return s;
       });
       return {
@@ -114,6 +118,8 @@
         awake_frames: awake,
         coma_frames: coma,
         unknown_frames: unknown,
+        empty_frames: empty,
+        occupancy: well.occupancy || "unknown",
         awake_seconds:
           project.mode === "sequence" ? awake * project.interval : null,
         coma_seconds:
@@ -144,7 +150,10 @@
           prediction: record.prediction || "unknown",
           confidence: record.confidence ?? null,
           model: record.model || null,
-          effective_state: effective(record),
+          effective_state: effective(
+            record,
+            taskOf(project) === "ccrt" ? well : null,
+          ),
           user_correction: record.correction || null,
           egg_count: record.egg_count ?? null,
           effective_egg_count:
@@ -493,6 +502,7 @@
             elapsed_seconds: r.elapsed_seconds,
             well_id: r.well_id,
             state: r.effective_state,
+            occupancy: r.occupancy,
             source: r.user_correction?.state
               ? "manual"
               : r.prediction !== "unknown"
@@ -575,7 +585,154 @@
     return annotations;
   }
 
+  function approveStableBoundaries(project, uids) {
+    let approved = 0,
+      skipped = 0;
+    for (const w of project.wells.filter((w) => uids.includes(w.uid))) {
+      const failures = project.frames
+        .map((_, i) => i)
+        .filter(
+          (i) =>
+            activeWell(w, i) &&
+            project.alignment_failures?.[i] &&
+            boundaryNeedsReview(w, i),
+        );
+      w.detection.review_required = false;
+      w.review_frames = failures;
+      for (let i = 0; i < project.frames.length; i++)
+        if (activeWell(w, i)) failures.includes(i) ? skipped++ : approved++;
+    }
+    project.history.push({
+      action: "approve-stable-sequence-boundaries",
+      at: new Date().toISOString(),
+      well_uids: uids,
+      approved,
+      skipped,
+    });
+    return { approved, skipped };
+  }
+  function importReadableReport(project, report) {
+    if (
+      report?.kind !== `${taskOf(project)}-results` ||
+      !Array.isArray(report.results) ||
+      !Array.isArray(report.well_map)
+    )
+      throw Error("Select a matching CCRT or egg-count report.");
+    if (!project.wells.length)
+      throw Error(
+        "This older report has annotations but no boundaries. Detect or draw the wells first, then import it again; the saved labels will be restored.",
+      );
+    const copy = structuredClone(project),
+      seen = new Set();
+    if (report.mode) copy.mode = report.mode;
+    if (
+      Number.isFinite(report.frame_interval_seconds) &&
+      report.frame_interval_seconds > 0
+    )
+      copy.interval = report.frame_interval_seconds;
+    if (typeof report.experiment_id === "string" && report.experiment_id)
+      copy.experiment_id = report.experiment_id;
+    const baseName = (name) =>
+      String(name).replaceAll("\\", "/").split("/").at(-1);
+    let imported = 0;
+    for (const row of report.results) {
+      const frame = (row.frame_number ?? row.image_number) - 1;
+      if (
+        !Number.isInteger(frame) ||
+        frame < 0 ||
+        frame >= copy.frames.length ||
+        (row.filename !== copy.frames[frame].name &&
+          (baseName(row.filename) !== baseName(copy.frames[frame].name) ||
+            copy.frames.filter(
+              (f) => baseName(f.name) === baseName(row.filename),
+            ).length !== 1))
+      )
+        throw Error(
+          "Report images do not match the selected images in their saved order.",
+        );
+      const id = row.well_id ?? row.region_id,
+        location = report.well_map.find(
+          (m) =>
+            m.well_id === id &&
+            (taskOf(copy) === "ccrt" || m.reference_frame === frame + 1),
+        );
+      const well = copy.wells.find((w) => w.id === id && activeWell(w, frame));
+      if (!well)
+        throw Error(
+          `Define or rename the matching well ${id} before importing. No annotations were changed.`,
+        );
+      if (
+        location &&
+        Number.isFinite(location.x_percent) &&
+        Number.isFinite(location.y_percent)
+      ) {
+        const pts = geometry(well, taskOf(copy) === "ccrt" ? 0 : frame),
+          xs = pts.map((p) => p[0]),
+          ys = pts.map((p) => p[1]);
+        const cx = (Math.min(...xs) + Math.max(...xs)) / 2,
+          cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+        if (
+          Math.hypot(
+            cx - location.x_percent / 100,
+            cy - location.y_percent / 100,
+          ) >
+          0.75 *
+            Math.max(
+              Math.max(...xs) - Math.min(...xs),
+              Math.max(...ys) - Math.min(...ys),
+            )
+        )
+          throw Error(
+            `Well ${id} is at a different position. Check its identity/boundary before importing. No annotations were changed.`,
+          );
+      }
+      const k = key(frame, well.uid);
+      if (seen.has(k)) throw Error("Duplicate report annotations.");
+      seen.add(k);
+      const record = {
+        prediction: row.model_prediction || "unknown",
+        confidence: row.confidence ?? null,
+        model: row.model || null,
+      };
+      if (taskOf(copy) === "eggs") {
+        if (row.source === "manual")
+          record.correction = {
+            state: null,
+            egg_count: row.egg_count,
+            notes: row.notes || "",
+            imported_from: "readable-report",
+            at: report.exported_at || new Date().toISOString(),
+          };
+        else record.egg_count = row.egg_count ?? null;
+      } else {
+        if (row.source === "manual" && row.state !== "empty")
+          record.correction = {
+            state: row.state === "uncertain" ? "unknown" : row.state,
+            notes: row.notes || "",
+            imported_from: "readable-report",
+            at: report.exported_at || new Date().toISOString(),
+          };
+        if (row.source === "model" && row.state !== "empty")
+          record.prediction = row.model_prediction || row.state;
+      }
+      if (row.occupancy) well.occupancy = row.occupancy;
+      if (row.state === "empty") well.occupancy = "empty";
+      copy.records[k] = record;
+      imported++;
+    }
+    copy.history.push({
+      action: "import-readable-report",
+      at: new Date().toISOString(),
+      imported,
+      source_exported_at: report.exported_at,
+    });
+    validateProject(exportProject(copy), copy.frames);
+    return { project: copy, imported };
+  }
+
   const api = {
+    approveStableBoundaries,
+    importReadableReport,
     activeWell,
     taskOf,
     boundaryNeedsReview,
