@@ -143,11 +143,27 @@ for i in [1,2,10]:
     singleBox.y + 0.4 * singleBox.height,
   );
   assert.equal(await page.locator("#wellSelect option").count(), 3);
+  await page.locator("#removeSelected").click();
+  assert.equal(await page.locator("#proposalSelect option").count(), 2);
+  assert.equal(await page.locator("#summary tr").count(), 1);
+  const remaining = await page
+    .locator("#proposalSelect option")
+    .nth(1)
+    .getAttribute("value");
+  await page.locator("#proposalSelect").selectOption(remaining);
+  assert.match(await page.locator("#prediction").textContent(), /AWAKE/);
+  await page.locator("#canvas").click({ position: { x: 5, y: 5 } });
+  // Select by ID so deletion works even when overlapping boundaries are hard to click.
+  await page.locator("#proposalSelect").selectOption(remaining);
+  await page.locator("#canvas").focus();
+  await page.keyboard.press("Delete");
+  assert.equal(await page.locator("#proposalSelect option").count(), 1);
+  assert.equal(await page.locator("#summary tr").count(), 0);
   assert.deepEqual(errors, []);
   await browser.close();
   console.log("Browser artifacts:", work);
   console.log(
-    "PASS browser: load/order, detect, annotate, preview/navigation, geometry edits, export/restore, playback, responsive layout; no JS errors",
+    "PASS browser: load/order, detect, annotate, preview/navigation, geometry edits, export/restore, playback, responsive layout, toolbar/keyboard deletion; no JS errors",
   );
 })().catch((e) => {
   console.error(e);

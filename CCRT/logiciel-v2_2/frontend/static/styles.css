@@ -329,3 +329,19 @@ progress {
     flex-wrap: wrap;
   }
 }
+
+.proposal-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.proposal-tools label {
+  min-width: 160px;
+  margin: 0;
+}
+.proposal-tools .hint {
+  flex: 1;
+  min-width: 200px;
+}

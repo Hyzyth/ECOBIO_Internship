@@ -5,6 +5,7 @@ There are no fake model predictions in manual-review mode.
 """
 import json
 import math
+from backend.services.geometry import is_simple_polygon
 ADAPTERS = {}
 def available_models():
     return [{'id': 'manual', 'name': 'Manual review', 'version': '1',
@@ -51,11 +52,7 @@ def parse_wells(wells_json):
             if not isinstance(identity, str) or not identity or identity in ids:
                 raise ValueError()
             ids.add(identity)
-            if not isinstance(points, list) or len(points) < 3:
-                raise ValueError()
-            if not all(isinstance(p, list) and len(p) == 2 and all(
-                not isinstance(v, bool) and isinstance(v, (int, float))
-                and math.isfinite(v) and 0 <= v <= 1 for v in p) for p in points):
+            if not is_simple_polygon(points):
                 raise ValueError()
     except (TypeError, ValueError):
         raise ValueError('Invalid well geometry.') from None
