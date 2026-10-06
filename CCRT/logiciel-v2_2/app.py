@@ -10,10 +10,17 @@ from backend.services.alignment import align_wells
 from backend.services.model_registry import available_models, analyze
 BASE_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, template_folder=str(BASE_DIR / 'frontend/templates'), static_folder=str(BASE_DIR / 'frontend/static'))
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 @app.get('/')
 def index():
-    return render_template('index.html')
+    return render_template('index.html', study='ccrt')
+@app.get('/ccrt')
+def ccrt():
+    return render_template('index.html', study='ccrt')
+@app.get('/eggs')
+def eggs():
+    return render_template('index.html', study='eggs')
 @app.get('/api/models')
 def models():
     return jsonify(available_models())

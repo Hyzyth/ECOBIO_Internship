@@ -21,6 +21,16 @@ class AppTests(unittest.TestCase):
         response.close()
         models = self.client.get('/api/models').json
         self.assertEqual(models[0]['id'], 'manual')
+    def test_distinct_study_pages(self):
+        ccrt=self.client.get('/ccrt');eggs=self.client.get('/eggs')
+        self.assertEqual(ccrt.status_code,200)
+        self.assertEqual(eggs.status_code,200)
+        self.assertIn(b'data-study="ccrt"',ccrt.data)
+        self.assertIn(b'data-study="eggs"',eggs.data)
+        self.assertIn(b'value="batch"',eggs.data)
+        self.assertNotIn(b'value="sequence"',eggs.data)
+        self.assertIn(b'Export egg training dataset ZIP',eggs.data)
+
     def test_non_circular_detection(self):
         response = self.client.post('/api/detect', data={'image':(io.BytesIO(self.image),'test.png')})
         self.assertEqual(response.status_code, 200)

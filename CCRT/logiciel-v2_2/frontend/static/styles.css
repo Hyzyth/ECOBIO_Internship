@@ -345,3 +345,52 @@ progress {
   flex: 1;
   min-width: 200px;
 }
+[hidden] {
+  display: none !important;
+}
+nav {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+nav a {
+  color: #d6e4ec;
+  text-decoration: none;
+  padding: 10px 14px;
+  border: 1px solid #3b5160;
+  border-radius: 6px;
+}
+nav a[aria-current="page"] {
+  background: #78dac0;
+  color: #10261e;
+}
+.state-coma,
+.coma {
+  background: #ff304f;
+  color: #fff;
+  border-color: #ff304f;
+}
+.state-awake,
+.awake {
+  background: #00ec57;
+  color: #05250e;
+  border-color: #00ec57;
+}
+.quick-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 14px 0;
+}
+.previews.single-preview {
+  grid-template-columns: minmax(0, 400px);
+}
+.range-labels {
+  border-top: 1px solid #3b5160;
+  margin-top: 20px;
+  padding-top: 8px;
+}
+body[data-study="ccrt"] [data-eggs],
+body[data-study="eggs"] [data-ccrt] {
+  display: none !important;
+}
