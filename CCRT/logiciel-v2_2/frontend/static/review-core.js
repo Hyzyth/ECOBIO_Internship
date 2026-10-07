@@ -154,6 +154,10 @@
           prediction: record.prediction || "unknown",
           confidence: record.confidence ?? null,
           model: record.model || null,
+          state_probabilities: record.state_probabilities || null,
+          occupancy_prediction: record.occupancy_prediction || null,
+          occupancy_score: record.occupancy_score ?? null,
+          occupancy_method: record.occupancy_method || null,
           effective_state: effective(
             record,
             taskOf(project) === "ccrt" ? well : null,
@@ -290,6 +294,8 @@
         )
           throw Error("Invalid alignment metadata.");
     }
+    if (p.layout === "individual" && p.wells.length > 1)
+      throw Error("Single-well layout permits at most one well.");
     const ids = new Set(),
       names = new Set();
     const validPoints = isSimplePolygon;
@@ -359,7 +365,9 @@
         Number(i) >= frames.length ||
         !ids.has(uid) ||
         !r ||
-        !["unknown", "coma", "awake", undefined].includes(r.prediction) ||
+        !["unknown", "coma", "awake", "empty", undefined].includes(
+          r.prediction,
+        ) ||
         (r.confidence != null &&
           (!Number.isFinite(r.confidence) ||
             r.confidence < 0 ||
@@ -567,11 +575,16 @@
         if (!activeWell(w, i)) return;
         const correction = project.records[key(i, w.uid)]?.correction;
         const manual =
-          task === "eggs" ? correction?.egg_count != null : !!correction?.state;
+          task === "eggs"
+            ? correction?.egg_count != null
+            : w.occupancy === "empty" || !!correction?.state;
         if (!manual) return;
         const partial = w.partial_frames?.[i] ?? !!w.detection.partial,
           reviewed = !boundaryNeedsReview(w, i);
-        const uncertain = task === "ccrt" && correction.state === "unknown";
+        const uncertain =
+          task === "ccrt" &&
+          w.occupancy !== "empty" &&
+          correction?.state === "unknown";
         annotations.push({
           id: `f${i + 1}-${w.uid}`,
           frame_index: i,
@@ -584,9 +597,17 @@
           well_uid: w.uid,
           split_group: project.experiment_id,
           task,
-          label: task === "eggs" ? correction.egg_count : correction.state,
-          annotation: structuredClone(correction),
-          label_source: "manual",
+          label:
+            task === "eggs"
+              ? correction.egg_count
+              : w.occupancy === "empty"
+                ? "empty"
+                : correction.state,
+          annotation: structuredClone(correction || {}),
+          label_source:
+            task === "ccrt" && w.occupancy === "empty"
+              ? "manual_occupancy"
+              : "manual",
           boundary_normalized: geometry(w, i),
           boundary_reviewed: reviewed,
           boundary_partial: partial,
@@ -598,15 +619,21 @@
             !reviewed ? "boundary_unreviewed" : null,
             uncertain ? "uncertain_state" : null,
             partial ? "partial_boundary" : null,
-            task === "ccrt" && w.occupancy !== "single"
-              ? "occupancy_not_confirmed_single"
+            task === "ccrt" && !["single", "empty"].includes(w.occupancy)
+              ? "occupancy_not_confirmed_single_or_empty"
               : null,
           ].filter(Boolean),
           eligible_for_training:
             reviewed &&
             !uncertain &&
             !partial &&
-            !(task === "ccrt" && w.occupancy !== "single"),
+            !(task === "ccrt" && !["single", "empty"].includes(w.occupancy)),
+          state_training_eligible:
+            task === "ccrt" &&
+            reviewed &&
+            !uncertain &&
+            !partial &&
+            w.occupancy === "single",
         });
       }),
     );

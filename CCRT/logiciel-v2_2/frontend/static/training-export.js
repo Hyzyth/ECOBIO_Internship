@@ -148,7 +148,10 @@
     files,
     onProgress = () => {},
     cancelled = () => false,
+    options = {},
   ) {
+    const role = options.role || "train";
+    if (!["train", "test"].includes(role)) throw Error("Invalid dataset role.");
     const annotations = ReviewCore.trainingAnnotations(project);
     if (!annotations.length)
       throw Error(
@@ -157,7 +160,10 @@
     const entries = [],
       images = [],
       task = ReviewCore.taskOf(project),
-      frames = [...new Set(annotations.map((a) => a.frame_index))];
+      frames =
+        role === "test"
+          ? project.frames.map((_, i) => i)
+          : [...new Set(annotations.map((a) => a.frame_index))];
     for (const [n, i] of frames.entries()) {
       if (cancelled())
         throw Error(
@@ -185,8 +191,18 @@
           sha256: sha,
         });
         entries.push({ name: imagePath, blob: file });
+        for (const a of annotations.filter((a) => a.frame_index === i))
+          Object.assign(a, {
+            image_path: imagePath,
+            image_width: image.width,
+            image_height: image.height,
+            boundary_pixels: a.boundary_normalized.map((p) => [
+              p[0] * image.width,
+              p[1] * image.height,
+            ]),
+          });
         for (const [j, a] of annotations
-          .filter((a) => a.frame_index === i)
+          .filter((a) => role !== "test" && a.frame_index === i)
           .entries()) {
           if (cancelled()) throw Error("Training export cancelled.");
           const points = a.boundary_normalized.map((p) => [
@@ -230,13 +246,14 @@
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     const manifest = {
-      schema_version: 1,
-      kind: `${task}-training`,
+      schema_version: 2,
+      role,
+      kind: `${task}-${role === "test" ? "test" : "training"}`,
       task,
       experiment_id: project.experiment_id,
       split_group: project.experiment_id,
       created_at: new Date().toISOString(),
-      classes: task === "ccrt" ? { coma: 0, awake: 1 } : null,
+      classes: task === "ccrt" ? { coma: 0, awake: 1, empty: 2 } : null,
       target:
         task === "ccrt"
           ? "state_classification"
@@ -254,34 +271,82 @@
           : "Per-frame well state",
       images,
       annotations,
+      wells: project.wells.map((w) => ({
+        well_id: w.id,
+        well_uid: w.uid,
+        occupancy: w.occupancy || "unknown",
+        frames: project.frames
+          .map((_, i) => ({
+            frame_index: i,
+            points: ReviewCore.geometry(w, i),
+            active: ReviewCore.activeWell(w, i),
+            partial: w.partial_frames?.[i] ?? !!w.detection.partial,
+          }))
+          .filter((f) => f.active),
+      })),
+      coverage: {
+        detected_wells: project.wells.length,
+        expected_samples: project.frames.reduce(
+          (n, _, i) =>
+            n + project.wells.filter((w) => ReviewCore.activeWell(w, i)).length,
+          0,
+        ),
+        annotated_samples: annotations.length,
+        eligible_samples: annotations.filter((a) => a.eligible_for_training)
+          .length,
+        annotated_wells: new Set(annotations.map((a) => a.well_uid)).size,
+        eligible_wells: new Set(
+          annotations
+            .filter((a) => a.eligible_for_training)
+            .map((a) => a.well_uid),
+        ).size,
+      },
       all_frame_count: project.frames.length,
       annotated_sample_count: annotations.length,
       eligible_sample_count: annotations.filter((a) => a.eligible_for_training)
         .length,
       notes: [
         "Targets come exclusively from manual annotations. Unannotated frame/wells are omitted.",
-        "Uncertain, partial, unreviewed, and CCRT empty/multiple/obscured/unconfirmed occupancy regions are retained with eligibility=false.",
+        "Uncertain, partial, unreviewed, and CCRT multiple/obscured/unconfirmed occupancy samples are retained with eligibility=false. Explicit Empty occupancy is a manual occupancy target, not a coma/awake label.",
         "Split related experiments together. Do not randomly split adjacent frames or wells from the same experiment.",
         "Egg targets are provisional independent-image or optional region counts; no well layout is assumed.",
       ],
     };
-    const response = await fetch("/static/dataset-loader.py");
-    if (!response.ok)
-      throw Error("Training loader unavailable; no archive exported.");
-    const loader = await response.text();
-    entries.push(
-      { name: "annotations.json", text: JSON.stringify(manifest, null, 2) },
-      {
-        name: "project.json",
-        text: JSON.stringify(ReviewCore.exportProject(project), null, 2),
-      },
-      { name: "annotations.csv", text: ReviewCore.tableCSV(annotations) },
-      { name: "dataset.py", text: loader },
-      {
-        name: "README.txt",
-        text: `FlyScope ${task} training dataset\n\nOriginal frames: images/\nMasked crops at original pixel resolution: crops/ (PNG alpha is the well mask).\nannotations.json contains frame/well IDs, SHA-256 image hashes, normalized/pixel polygons, crop boxes, manual label provenance, review status and eligibility. project.json retains the complete review and history.\n\nInstall Pillow, then: python dataset.py .\nImport samples(root) in your training code; it yields RGB PIL images, targets and annotation metadata. Only eligible manual targets are selected by default. Unknown is uncertainty, never a coma/awake class. Coma=0; Awake=1. Egg targets are integer counts, including zero. No model is supplied.\n\nKeep the experiment split_group together when creating train/validation/test splits. Pixel data are original image pixels, never UI screenshots. Cropped reference boundaries cannot recover unseen rims; review all frames before labeling training targets.\n`,
-      },
-    );
+    const manifestText = JSON.stringify(manifest, null, 2);
+    entries.push({ name: "annotations.json", text: manifestText });
+    if (role === "train") {
+      const response = await fetch("/static/dataset-loader.py");
+      if (!response.ok)
+        throw Error("Training loader unavailable; no archive exported.");
+      entries.push(
+        {
+          name: "project.json",
+          text: JSON.stringify(ReviewCore.exportProject(project), null, 2),
+        },
+        { name: "annotations.csv", text: ReviewCore.tableCSV(annotations) },
+        { name: "dataset.py", text: await response.text() },
+      );
+      if (task === "ccrt") {
+        const plan = DatasetPlans.build(manifest, options.comparisons || {});
+        plan.dataset_sha256 = Array.from(
+          new Uint8Array(
+            await crypto.subtle.digest("SHA-256", encoder.encode(manifestText)),
+          ),
+          (b) => b.toString(16).padStart(2, "0"),
+        ).join("");
+        entries.push({
+          name: "comparison-plan.json",
+          text: JSON.stringify(plan, null, 2),
+        });
+      }
+    }
+    entries.push({
+      name: "README.txt",
+      text:
+        role === "test"
+          ? "FlyScope evaluation-only dataset. Original images and manual annotations/geometry only; no duplicate crops, project history or training extras. Use tools/model_experiments.py evaluate or compare. Score only eligible annotated wells; unannotated wells are never negatives. This is not an editable project backup. Keep this grid separate from training.\n"
+          : "FlyScope training dataset: original images, alpha-masked crops, manual targets, geometry, provenance and project backup. Partial annotations are supported; unannotated wells are omitted. Empty is a manual occupancy target; coma/awake requires one individual. Keep comparison-plan.json identical across models; each run selects entire wells, only their eligible labels, and fixed seeds. Poor/rich well IDs are experiment selections, not special annotation notes. Unzip then use tools/model_experiments.py; see repository README. dataset.py is a generic Pillow loader; model_experiments uses the original pixels and shared model preprocessing.\n",
+    });
     if (cancelled()) throw Error("Training export cancelled.");
     return {
       blob: await zip(

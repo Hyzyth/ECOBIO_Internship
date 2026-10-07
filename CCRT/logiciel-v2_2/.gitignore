@@ -1,3 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Generated experiments and fine-tuned artifacts belong outside source control.
+experiments/
+trained-models/

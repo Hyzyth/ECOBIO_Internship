@@ -6,6 +6,7 @@
     <title>FlyScope · Experimental review</title>
     <link rel="stylesheet" href="/static/styles.css" />
     <script defer src="/static/review-core.js"></script>
+    <script defer src="/static/dataset-plans.js"></script>
     <script defer src="/static/training-export.js"></script>
     <script defer src="/static/review.js"></script>
   </head>
@@ -161,14 +162,16 @@
         <h2>04 / Save</h2>
         <button id="report">
           Export {{ 'CCRT' if study == 'ccrt' else 'egg-count' }} human report ZIP</button
-        ><button id="training" class="secondary">
+        ><label><input id="datasetTest" type="checkbox" /> Export as test set (images and annotations only)</label>
+        <div id="comparisonOptions" data-ccrt><label>Shared comparison seed<input id="comparisonSeed" type="number" min="0" max="4294967295" step="1" value="2026" /></label><label>Poor-pose well ID (optional)<input id="poorWell" placeholder="e.g. W3" /></label><label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label><p class="hint">Same saved selections for every model: all annotated wells; 2 × 50, 5 × 25, 10 × 10, 20 × 5 and 30 × 2 random wells. Budgets larger than the annotated pool are reported as skipped. Partial annotations are supported.</p></div>
+        <button id="training" class="secondary">
           Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP
         </button>
         <p class="hint">
           Reports include readable results, summaries and a numbered location
           map. Training datasets include original images, masked crops,
           annotations and a Python loader. Only manual labels become training
-          targets; CCRT requires confirmed single occupancy. Uncertain, partial or unreviewed cases remain flagged for
+          targets. Coma/awake requires confirmed single occupancy; explicit Empty supplies an occupancy target. Uncertain, partial or unreviewed cases remain flagged for
           review.
         </p>
         <button id="machine" class="secondary">Export machine analysis ZIP</button>
@@ -386,8 +389,7 @@
             </table>
           </div>
           <p class="hint" data-sequence>
-            Time = classified frame count × confirmed interval. Unknown frames
-            interrupt transitions. Single-image mode reports counts only. Labels
+            Durations cover the observed intervals between the first and last images. Unknown transition gaps require review. Frame 1 defaults to cold-exposure-end time zero. Labels
             remain distinct from model predictions.
           </p>
         </div>

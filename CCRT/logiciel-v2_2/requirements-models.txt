@@ -1,0 +1,4 @@
+# Optional CPU model inference / reproducible fine-tuning. Python >=3.10.
+-r requirements.txt
+tensorflow-cpu==2.21.0
+keras==3.15.1

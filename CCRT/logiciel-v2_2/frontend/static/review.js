@@ -17,6 +17,7 @@ let project = {
     experiment_id: crypto.randomUUID(),
     mode: study === "eggs" ? "batch" : "sequence",
     interval: 1,
+    layout: "grid",
     frames: [],
     wells: [],
     records: {},
@@ -330,7 +331,7 @@ function updateDetails() {
   $("undoLabels").disabled = busy || !lastLabelOperation;
   $("rangeStart").max = $("rangeEnd").max = project.frames.length || 1;
   $("prediction").textContent = w
-    ? `${w.id} · ${study === "ccrt" ? (w.occupancy === "empty" ? "EMPTY" : r.correction?.state === "unknown" ? "UNCERTAIN" : C.effective(r, study === "ccrt" ? w : null).toUpperCase()) : "EGG COUNT"} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.correction ? " · Manual annotation applied" : ""}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
+    ? `${w.id} · ${study === "ccrt" ? (w.occupancy === "empty" ? "EMPTY" : r.correction?.state === "unknown" ? "UNCERTAIN" : C.effective(r, study === "ccrt" ? w : null).toUpperCase()) : "EGG COUNT"} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}${r.correction ? " · Manual annotation applied" : ""}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
   renderSummary();
   updateContext();
@@ -396,6 +397,22 @@ function addWell(
     throw Error(
       "Boundary must be a simple polygon with nonzero area; edges cannot cross or retrace.",
     );
+  if (
+    study === "ccrt" &&
+    $("layout").value === "individual" &&
+    project.wells.length
+  ) {
+    const well = project.wells[0];
+    if (
+      !confirm(
+        `Single-well mode keeps one identity. Replace ${well.id}'s boundary in the selected edit scope? Manual labels are preserved.`,
+      )
+    )
+      return;
+    saveGeometry(well, points);
+    select(well.uid);
+    return;
+  }
   const uid = crypto.randomUUID();
   let n = 1;
   while (project.wells.some((w) => w.id === `W${n}`)) n++;
@@ -473,6 +490,7 @@ async function loadFiles(input) {
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
+    layout: $("layout").value,
     interval: Number($("interval").value) || 1,
     order: $("order").value,
     frames: files.map(frameMetadata),
@@ -549,6 +567,10 @@ function setBusy(value) {
     "eggScope",
     "confirmSingles",
     "training",
+    "datasetTest",
+    "comparisonSeed",
+    "poorWell",
+    "richWell",
     "experiment",
   ].forEach((id) => ($(id).disabled = value));
   $("cancel").hidden = !value;
@@ -840,6 +862,8 @@ $("mode").onchange = () => {
   ) {
     $("experiment").value = project.experiment_id;
     lastLabelOperation = null;
+    $("layout").value =
+      project.layout || (project.wells.length > 1 ? "grid" : "individual");
     $("mode").value = project.mode;
     return;
   }
@@ -859,6 +883,7 @@ $("mode").onchange = () => {
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
+    layout: $("layout").value,
     interval: Number($("interval").value) || 1,
     order: $("order").value,
     frames: [],
@@ -1086,6 +1111,7 @@ $("analyze").onclick = async () => {
               id: w.uid,
               points: C.geometry(w, i),
               occupancy: w.occupancy,
+              partial: w.partial_frames?.[i] ?? !!w.detection.partial,
             })),
         ),
       );
@@ -1102,6 +1128,10 @@ $("analyze").onclick = async () => {
         project.records[k] = {
           ...project.records[k],
           prediction: r.prediction,
+          state_probabilities: r.state_probabilities || null,
+          occupancy_prediction: r.occupancy_prediction || null,
+          occupancy_score: r.occupancy_score ?? null,
+          occupancy_method: r.occupancy_method || null,
           confidence: r.confidence,
           model: data.model,
           egg_count: r.egg_count ?? null,
@@ -1197,6 +1227,8 @@ async function importSaved(file) {
         "Project restored. Images matched by path, size and modification time.",
       );
     }
+    $("layout").value =
+      project.layout || (project.wells.length > 1 ? "grid" : "individual");
     $("mode").value = project.mode;
     $("interval").value = project.interval;
     $("order").value = project.order || "name";
@@ -1240,16 +1272,22 @@ window.addEventListener("beforeunload", (e) => {
       ...models.map(
         (m) =>
           new Option(
-            `${m.id === "manual" ? "Manual " + (study === "eggs" ? "egg counting" : "CCRT review") : m.name} · ${m.version}`,
+            `${m.id === "manual" ? "Manual " + (study === "eggs" ? "egg counting" : "CCRT review") : m.name} · ${m.version.slice(0, 12)}${m.available === false ? " (install model dependencies)" : ""}`,
             m.id,
           ),
       ),
     );
+    [...$("model").options].forEach((option) => {
+      if (models.find((m) => m.id === option.value)?.available === false)
+        option.disabled = true;
+    });
     $("model").onchange = () => {
       const m = models.find((m) => m.id === $("model").value);
       $("modelInfo").textContent =
         m?.id === "manual"
-          ? "Manual annotations only; no trained model is available."
+          ? study === "eggs"
+            ? "Manual egg annotations; no egg model is registered."
+            : "Manual annotations only. Choose a model above to predict states."
           : m?.description || "";
       updateContext();
     };
@@ -1419,6 +1457,10 @@ function updateContext() {
   $("align").disabled = busy || !sequence || index === 0 || files.length < 2;
   $("alignSequence").disabled = busy || !sequence || files.length < 2;
   $("analyze").disabled = busy || $("model").value === "manual";
+  $("comparisonOptions").hidden = $("datasetTest").checked || study !== "ccrt";
+  $("training").textContent = $("datasetTest").checked
+    ? "Export test dataset ZIP"
+    : `Export ${study === "ccrt" ? "CCRT" : "egg"} training dataset ZIP`;
   $("analyze").hidden = $("model").value === "manual";
   $("detectionHint").textContent =
     $("detectionMethod").value === "contours"
@@ -1583,11 +1625,23 @@ $("training").onclick = async () => {
         );
       },
       () => cancelled,
+      {
+        role: $("datasetTest").checked ? "test" : "train",
+        comparisons: {
+          seed: Number($("comparisonSeed").value),
+          poor_well_id: $("poorWell").value,
+          rich_well_id: $("richWell").value,
+        },
+      },
     );
-    if (cancelled) throw Error("Training export cancelled.");
-    download(`flyscope-${study}-training.zip`, blob, "application/zip");
+    if (cancelled) throw Error("Dataset export cancelled.");
+    download(
+      `flyscope-${study}-${manifest.role === "test" ? "test" : "training"}.zip`,
+      blob,
+      "application/zip",
+    );
     status(
-      `Training dataset exported: ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. Original images and masked crops included.`,
+      `${manifest.role === "test" ? "Test" : "Training"} dataset exported: ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. ${manifest.role === "test" ? "Evaluation images/annotations only; no project backup or duplicate crops." : "Images, crops and shared comparison selections included."}`,
     );
   } catch (error) {
     status(error.message);
@@ -1597,7 +1651,16 @@ $("training").onclick = async () => {
   }
 };
 
-$("layout").onchange = updateContext;
+$("layout").onchange = () => {
+  if ($("layout").value === "individual" && project.wells.length > 1) {
+    $("layout").value = "grid";
+    status(
+      "Single-well mode allows one well. Remove extra wells or start with new images first.",
+    );
+  }
+  project.layout = $("layout").value;
+  updateContext();
+};
 function nextMissing(kind) {
   const well = selectedWell();
   if (!well || busy) return;
@@ -1772,3 +1835,5 @@ $("eggScope").onchange = () => {
   updateContext();
   draw();
 };
+
+$("datasetTest").onchange = updateContext;

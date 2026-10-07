@@ -144,6 +144,10 @@ for i in [1,2,10]:
     singleBox.x + 0.2 * singleBox.width,
     singleBox.y + 0.4 * singleBox.height,
   );
+  assert.equal(await page.locator("#wellSelect option").count(), 2);
+  assert.match(await page.locator("#prediction").textContent(), /AWAKE/);
+  await page.locator("#layout").selectOption("grid");
+  await page.locator("#whole").click();
   assert.equal(await page.locator("#wellSelect option").count(), 3);
   await page.locator("#removeSelected").click();
   assert.equal(await page.locator("#proposalSelect option").count(), 2);
