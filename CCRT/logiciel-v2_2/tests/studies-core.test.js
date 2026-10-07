@@ -191,7 +191,9 @@ test("empty occupancy overrides presentation and summary while preserving manual
   assert.equal(s.coma_frames, 0);
   assert.equal(s.unknown_frames, 0);
   assert.equal(C.resultsReport(p).results[0].state, "empty");
-  assert.equal(C.trainingAnnotations(p)[0].eligible_for_training, false);
+  assert.equal(C.trainingAnnotations(p)[0].eligible_for_training, true);
+  assert.equal(C.trainingAnnotations(p)[0].label, "empty");
+  assert.equal(C.trainingAnnotations(p)[0].state_training_eligible, false);
   assert.equal(p.records["0:well1"].correction.state, "coma");
   p.wells[0].occupancy = "single";
   assert.equal(C.summary(p)[0].coma_frames, 3);
@@ -277,14 +279,16 @@ test("occupancy prevents invalid CCRT and training; empty and multiple override 
   const p = project();
   C.applyStateRange(p, "well1", 0, 1, "coma");
   C.applyStateRange(p, "well1", 2, 2, "awake");
-  for (const occupancy of ["empty", "multiple", "unknown", "obscured"]) {
+  for (const occupancy of ["multiple", "unknown", "obscured"]) {
     p.wells[0].occupancy = occupancy;
     assert.equal(C.recoveryMetrics(p, p.wells[0]).ccrt_seconds, null);
     assert.ok(
       C.trainingAnnotations(p).every(
         (a) =>
           !a.eligible_for_training &&
-          a.exclusion_reasons.includes("occupancy_not_confirmed_single"),
+          a.exclusion_reasons.includes(
+            "occupancy_not_confirmed_single_or_empty",
+          ),
       ),
     );
   }

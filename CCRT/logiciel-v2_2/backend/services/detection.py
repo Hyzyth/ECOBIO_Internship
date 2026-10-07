@@ -127,6 +127,32 @@ def _single_well(gray, diameter=None, region=None):
     return sorted(candidates,key=lambda c:c['radius'],reverse=True)[:1]
 
 
+def _clean_single_polygon(points, width, height):
+    """Reject spikes and near-duplicate vertices relative to boundary size.
+
+    Only automatic single-well proposals use these quality rules. Manual and
+    grid boundaries retain the existing arbitrary simple-polygon contract.
+    """
+    polygon=np.asarray(points,float)*[width,height]
+    span=np.ptp(polygon,axis=0)
+    distance=max(1., min(span)*.015)
+    area=lambda p:abs(float(cv2.contourArea(p.astype(np.float32))))
+    original=area(polygon)
+    if original < .12*width*height or min(span)<.45*min(width,height): return []
+    while len(polygon)>3:
+        edges=np.linalg.norm(polygon-np.roll(polygon,-1,axis=0),axis=1)
+        if edges.min()>=distance:break
+        candidate=np.delete(polygon,(int(edges.argmin())+1)%len(polygon),axis=0)
+        if abs(area(candidate)-original)>.05*original:return []
+        polygon=candidate
+    for i,p in enumerate(polygon):
+        a=polygon[i-1]-p;b=polygon[(i+1)%len(polygon)]-p
+        cosine=np.dot(a,b)/max(1e-12,np.linalg.norm(a)*np.linalg.norm(b))
+        if np.degrees(np.arccos(np.clip(cosine,-1,1))) < 25:return []
+    result=(polygon/[width,height]).tolist()
+    return result if is_simple_polygon(result) else []
+
+
 def _contours(gray, single=False):
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blurred, 30, 90)
@@ -135,7 +161,7 @@ def _contours(gray, single=False):
     proposals = []
     for contour in contours:
         area = cv2.contourArea(contour)
-        if not .0005*w*h < area < (.95 if single else .12)*w*h:
+        if not (.12 if single else .0005)*w*h < area < (.95 if single else .12)*w*h:
             continue
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
@@ -221,6 +247,14 @@ def detect_wells(content, method='auto', diameter=None, region=None, layout='gri
             wells.append({'points':[[x/sw,y/sh] for x,y in proposal['points']],
                           'source':'repaired-convex-contour' if proposal['repaired'] else 'simple-contour-proposal','review_required':True,'confidence':None})
         used = 'contours'
+    if layout == "individual":
+        valid=[]
+        for well in wells:
+            points=_clean_single_polygon(well["points"],sw,sh)
+            if points:
+                well["points"]=points
+                valid.append(well)
+        wells=valid[:1]
     # Cluster rows by centers, then assign IDs left-to-right, without fixed rows.
     center = lambda well:np.mean(well['points'],axis=0)
     wells.sort(key=lambda well:center(well)[1])
