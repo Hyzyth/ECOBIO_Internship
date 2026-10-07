@@ -4,15 +4,18 @@ This local Flask app has separate **CCRT** (`/ccrt`) and **Egg counting** (`/egg
 
 ## Run
 
-Python 3.12 is supported. From `CCRT/logiciel-v2_2`:
+The deployment target is **Python 3.10.7 on Linux**, matching `.python-version` and the original Windows project's Python version. From `CCRT/logiciel-v2_2`, use your installed Python 3.10.7 explicitly:
 
 ```sh
-python -m venv .venv
+python3.10 --version  # Expected: Python 3.10.7
+python3.10 -m venv .venv
 .venv/bin/python -m pip install -r requirements-models.txt
 .venv/bin/python app.py
 ```
 
-Open the local server on port 5000 in your browser. In the prepared cloud machine use `/workspace/ecobio-venv/bin/python app.py` from the same directory. This is a local development application, not a multi-user hosted service.
+If that interpreter is unavailable and you use `uv`, `uv python install 3.10.7` followed by `uv venv --python 3.10.7 --seed .venv` creates the same runtime. On Windows, use `py -3.10 --version`, `py -3.10 -m venv .venv`, and `.venv\Scripts\python.exe` instead of `.venv/bin/python`; check the exact patch version before installation.
+
+Open the local server on port 5000 in your browser. In the prepared cloud machine use `/workspace/ecobio-venv-3107/bin/python app.py` from the same directory. This is a local development application, not a multi-user hosted service. The tested Linux environment is x86_64; the pinned Linux binary packages require glibc 2.28 or newer. Windows and other CPU architectures have not been runtime-tested here.
 
 ## Review workflow
 
@@ -40,7 +43,8 @@ Images remain in the browser except when sent to local detection/alignment/model
 ## Validation
 
 ```sh
-python -m unittest discover -s tests -v
+.venv/bin/python -m pip check
+.venv/bin/python -m unittest discover -s tests -v
 node --test tests/*.test.js
 ```
 
@@ -115,7 +119,7 @@ For CCRT, **Empty** occupancy applies to the entire well: its outline turns cyan
 
 ## Original models and reproducible comparisons
 
-Install `requirements-models.txt` for the CNNs and training tools (Python >=3.10; tested on 3.12). For manual review alone, `requirements.txt` suffices. Model loading is lazy and bounded to small CPU batches. Choose **Original CNN 1** or **Original CNN 2**, then analyze the image/sequence. Predictions retain class probabilities, artifact/preprocessing version and occupancy-method provenance; manual labels remain separate.
+Install `requirements-models.txt` for the CNNs and training tools. TensorFlow CPU 2.21.0 and Keras 3.12.4 are tested on Python 3.10.7/Linux. Keras is deliberately pinned below 3.13, which dropped Python 3.10 support. For manual review alone, `requirements.txt` suffices. Model loading is lazy and bounded to small CPU batches. Choose **Original CNN 1** or **Original CNN 2**, then analyze the image/sequence. Predictions retain class probabilities, artifact/preprocessing version and occupancy-method provenance; manual labels remain separate.
 
 Both supplied artifacts accept 200×200 grayscale images and output **coma, awake** in the order documented by the original `backend/services/cnn.py`. They have no trained Empty class. Shared inference/training preprocessing reproduces contrast alpha=1.5/beta=120, BGR-to-gray, Otsu threshold, 200×200 resize and normalization. Polygon-exterior pixels are replaced with the interior background before thresholding, then white, to exclude other wells; this mask adaptation is explicitly versioned. The legacy networks' original training-set provenance is not supplied.
 
