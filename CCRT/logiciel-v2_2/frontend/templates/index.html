@@ -28,176 +28,158 @@
       </nav>
     </header>
     <main>
-      <aside>
-        <h2>01 / Input</h2>
-        <label
-          >Analysis mode<select id="mode">
-            {% if study == 'ccrt' %}
-            <option value="sequence">Ordered sequence</option>
-            {% else %}
-            <option value="batch">Independent image collection</option>
-            {% endif %}
+      <aside aria-label="Review workflow">
+        <nav class="workflow-nav" aria-label="Workflow steps">
+          <button id="stepImages" class="workflow-tab" data-step="images" aria-current="step">1 · Images</button>
+          <button id="stepWells" class="workflow-tab" data-step="wells" disabled>2 · Wells</button>
+          <button id="stepReview" class="workflow-tab" data-step="review" disabled>3 · Review</button>
+          <button id="stepExport" class="workflow-tab" data-step="export" disabled>4 · Export</button>
+        </nav>
+        <p id="workflowHint" class="hint" aria-live="polite">Start by choosing your images.</p>
+        <section id="inputStep" data-workflow-stages="images" aria-labelledby="inputHeading">
+          <h2 id="inputHeading" tabindex="-1">Choose images</h2>
+          <label>Analysis mode<select id="mode">
+            {% if study == 'ccrt' %}<option value="sequence">Ordered sequence</option>
+            {% else %}<option value="batch">Independent image collection</option>{% endif %}
             <option value="single">Single image / Non-sequential</option>
-          </select></label
-        ><button id="browse">Browse image folder</button
-        ><input
-          id="folder"
-          type="file"
-          webkitdirectory
-          multiple
-          hidden
-        /><button id="filesButton" class="secondary">Choose image files</button
-        ><input
-          id="files"
-          type="file"
-          accept="image/png,image/jpeg,image/bmp,image/webp"
-          multiple
-          hidden
-        />
-        <p id="inputInfo" class="hint">
-          Images stay in your browser. Detection and model analysis send the
-          current image to the local server.
-        </p>
-        <label data-multiple
-          >File ordering<select id="order">
-            <option value="name">Filename timestamp / natural filename</option>
-            <option value="modified">File modification time</option>
-          </select></label
-        ><label data-sequence
-          >Frame interval (seconds)<input
-            id="interval"
-            type="number"
-            min="0.001"
-            step="0.1"
-            value="1"
-        /></label>
-        <label data-sequence><input id="timeConfirmed" type="checkbox" checked /> Timing referenced to cold-exposure end</label><label data-sequence>Delay from cold-exposure end to frame 1 (seconds)<input id="recoveryDelay" type="number" min="0" step="0.1" value="0" /></label>
-        <p class="hint" data-sequence>Frame 1 is time zero by default. Enter a delay only if acquisition starts later.</p>
-        <p class="hint" data-sequence>
-          Confirm ordering in the frame list. Duration summaries use this
-          interval; filenames supply optional timestamps, without an assumed
-          timezone.
-        </p>
-        <details data-multiple>
-          <summary>Image order</summary>
-          <ol id="frameList"></ol>
-        </details>
-        <label
-          >Experiment / split group<input
-            id="experiment"
-            placeholder="e.g. cold-recovery-2026-10-06-run1"
-        /></label>
-        <p class="hint">
-          Use the same experiment ID for related images. Training exports keep
-          this group together to help avoid train/test leakage.
-        </p>
-        <label data-eggs>Annotation scope<select id="eggScope"><option value="image">Whole image (no layout assumed)</option><option value="areas">Optional custom areas</option></select></label>
-        <p data-eggs class="hint">Independent images. The final egg annotation format can be adapted when the experimental data arrive.</p>
-        <div data-geometry id="geometryControls">
-        <h2>02 / {{ 'Wells' if study == 'ccrt' else 'Regions' }}</h2>
-        <label
-          >Image layout<select id="layout">
+          </select></label>
+          <button id="browse">Browse image folder</button>
+          <input id="folder" type="file" webkitdirectory multiple hidden />
+          <button id="filesButton" class="secondary">Choose image files</button>
+          <input id="files" type="file" accept="image/png,image/jpeg,image/bmp,image/webp" multiple hidden />
+          <p id="inputInfo" class="hint">Images stay in your browser. Detection and model analysis send the current image to the local server.</p>
+          <details id="loadingOptions" data-multiple-mode>
+            <summary>Loading options</summary>
+            <label>File ordering for next load<select id="order">
+              <option value="name">Filename timestamp / natural filename</option>
+              <option value="modified">File modification time</option>
+            </select></label>
+            <p class="hint">Natural order puts frame2 before frame10. This setting applies when images are loaded; it does not reorder an existing review.</p>
+          </details>
+          <div data-loaded hidden>
+            <details data-multiple><summary>Check image order</summary><ol id="frameList"></ol></details>
+            <label data-sequence>Frame interval (seconds)<input id="interval" type="number" min="0.001" step="0.1" value="1" /></label>
+            <p class="hint" data-sequence>Use the interval between recorded images, not the playback speed. Frame 1 is time zero by default.</p>
+            <details id="timingOptions" data-sequence>
+              <summary>Change the time reference</summary>
+              <label><input id="timeConfirmed" type="checkbox" checked /> Timing referenced to cold-exposure end</label>
+              <label>Delay from cold-exposure end to frame 1 (seconds)<input id="recoveryDelay" type="number" min="0" step="0.1" value="0" /></label>
+            </details>
+            <label data-eggs>Count in<select id="eggScope"><option value="image">Whole images</option><option value="areas">Custom areas</option></select></label>
+            <button id="inputContinue" class="workflow-next" data-next-step>Continue to wells →</button>
+            <details id="restoreOptions">
+              <summary>Resume a saved review</summary>
+              <p class="hint">Select the original images first, then import your saved project or report.</p>
+              <button id="importReportButton" class="secondary">Import report / dataset ZIP or JSON</button>
+              <input id="importReport" type="file" accept=".zip,.json,application/zip,application/json" hidden />
+              <button id="importButton" class="secondary">Restore JSON project</button>
+              <input id="import" type="file" accept="application/json" hidden />
+            </details>
+            <button id="saveDraft" class="secondary" data-project-wells>Save current project backup</button>
+          </div>
+        </section>
+        <section id="geometryControls" data-workflow-stages="wells" data-geometry hidden aria-labelledby="wellsHeading">
+          <h2 id="wellsHeading" tabindex="-1">{{ 'Define wells' if study == 'ccrt' else 'Define counting areas' }}</h2>
+          <label data-ccrt>Image layout<select id="layout">
             <option value="grid">Full grid / multiple wells</option>
             <option value="individual">Single well / individual</option>
-          </select></label
-        ><label
-          >Detection method<select id="detectionMethod">
-            <option value="auto">Automatic (repeated rings / contours)</option>
-            <option value="grid">Repeated circular wells</option>
-            <option value="contours">Non-circular contours</option>
-          </select></label
-        ><label
-          >Approximate well diameter (original-image pixels)<input
-            id="diameter"
-            type="number"
-            min="1"
-            placeholder="Automatic"
-        /></label>
-        <p class="hint" id="detectionHint">
-          For circular grids, size and spacing filters reduce fixation
-          proposals. Set diameter when automatic size estimation is wrong.
-          Non-circular mode preserves simple contours, including concave shapes.
-          Draw a detection region to exclude hardware.
-        </p>
-        <button id="detect">Suggest well boundaries</button
-        ><button data-sequence id="align" class="secondary">
-          Align current frame to first</button
-        ><button data-sequence id="alignSequence" class="secondary">
-          Align entire sequence to first</button
-        ><button id="clearRegion" class="secondary">
-          Clear detection region</button
-        ><button id="whole" class="secondary">Use full image as one well</button
-        ><label
-          >Canvas tool<select id="tool">
+          </select></label>
+          <button id="detect">Suggest well boundaries</button>
+          <button id="drawWell" class="secondary">Draw a boundary manually</button>
+          <button id="whole" class="secondary">Use full image as one well</button>
+          <details id="detectionOptions">
+            <summary>Adjust automatic detection</summary>
+            <label>Detection method<select id="detectionMethod">
+              <option value="auto">Automatic (repeated rings / contours)</option>
+              <option value="grid">Repeated circular wells</option>
+              <option value="contours">Non-circular contours</option>
+            </select></label>
+            <label>Approximate well diameter (pixels)<input id="diameter" type="number" min="1" placeholder="Automatic" /></label>
+            <p class="hint" id="detectionHint"></p>
+            <button id="setRegion" class="secondary">Limit detection to an area</button>
+            <button id="clearRegion" class="secondary">Clear detection area</button>
+          </details>
+          <label>Canvas tool<select id="tool">
             <option value="select">Select / move well</option>
-            <option value="polygon">
-              Draw polygon (double-click to finish)
-            </option>
+            <option value="polygon">Draw polygon (double-click to finish)</option>
             <option value="remove">Remove well (click inside)</option>
-            <option value="region">
-              Set detection region (drag rectangle)
-            </option>
+            <option value="region">Set detection region (drag rectangle)</option>
             <option value="vertex">Edit boundary vertices</option>
-          </select></label
-        ><label data-sequence
-          >Edit scope<select id="scope">
+          </select></label>
+          <label data-sequence>Edit scope<select id="scope">
             <option value="frame">Current frame (alignment correction)</option>
             <option value="all">Shared boundary across frames</option>
-          </select></label
-        ><label
-          ><input id="mask" type="checkbox" checked /> Mask outside wells</label
-        >
-        <p class="hint" data-ccrt>
-          Shapes use normalized coordinates. Camera alignment proposes
-          frame-specific corrections; review them or edit manually. Identities
-          remain stable. Detection is a proposal, not an occupancy estimate.
-        </p>
+          </select></label>
+          <details id="alignmentOptions" data-sequence data-wells>
+            <summary>Correct camera movement</summary>
+            <p class="hint">Use if the grid shifts. Review the proposed boundaries afterwards.</p>
+            <button id="alignSequence" class="secondary">Align entire sequence to first</button>
+            <button id="align" class="secondary">Align current frame to first</button>
+          </details>
+          <label data-wells><input id="mask" type="checkbox" checked /> Dim outside wells</label>
+          <button id="wellsContinue" class="workflow-next" data-next-step disabled>Continue to review →</button>
+        </section>
+        <section data-workflow-stages="review" hidden aria-labelledby="reviewHeading">
+          <h2 id="reviewHeading" tabindex="-1">{{ 'Review and label' if study == 'ccrt' else 'Count eggs' }}</h2>
+          <p class="hint">{{ 'Select a well, check whether it contains one individual, then label its state. You can annotate only the wells you need.' if study == 'ccrt' else 'Enter a count for each independent image or area. Use zero when no eggs are present.' }}</p>
+          <button class="secondary" data-go-step="wells" data-geometry>Edit boundaries</button>
+          <details id="modelOptions" hidden>
+            <summary>Optional model predictions</summary>
+            <label>Model<select id="model"></select></label>
+            <p id="modelInfo" class="hint"></p>
+            <button id="analyze">Analyze sequence</button>
+          </details>
+          <button id="reviewContinue" class="workflow-next" data-next-step>Continue to export →</button>
+        </section>
+        <section data-workflow-stages="export" hidden aria-labelledby="exportHeading">
+          <h2 id="exportHeading" tabindex="-1">Save your review</h2>
+          <button id="report">Download readable report ZIP</button>
+          <p class="hint">Results, summary and numbered location maps. Includes a project backup for later editing.</p>
+          <button id="json" class="secondary">Save project backup JSON</button>
+          <p class="hint">Save before leaving. Images are not embedded in the backup.</p>
+          <details id="trainingOptions">
+            <summary>Export a training or test dataset</summary>
+            <label>Experiment / split group<input id="experiment" placeholder="e.g. cold-recovery-run1" /></label>
+            <p class="hint">Use the same ID for related images to keep training and evaluation experiments separate.</p>
+            <label><input id="datasetTest" type="checkbox" /> Export as test set</label>
+            <details id="comparisonOptions" data-ccrt>
+              <summary>Shared model comparison selections</summary>
+              <label>Shared seed<input id="comparisonSeed" type="number" min="0" max="4294967295" step="1" value="2026" /></label>
+              <label>Poor-pose well ID (optional)<input id="poorWell" placeholder="e.g. W3" /></label>
+              <label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label>
+              <p class="hint">Every model uses the same saved selections: all annotated wells; 2 × 50, 5 × 25, 10 × 10, 20 × 5 and 30 × 2 random wells. Oversized budgets are skipped.</p>
+            </details>
+            <p id="datasetHint" class="hint"></p>
+            <button id="training" class="secondary">Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP</button>
+          </details>
+          <details id="otherExports">
+            <summary>Additional export formats</summary>
+            <button id="csv" class="secondary">Download readable results CSV</button>
+            <button id="machine" class="secondary">Export machine analysis ZIP</button>
+            <p class="hint">Machine analysis retains frame-level geometry, predictions, corrections and model provenance.</p>
+          </details>
+          <button class="secondary" data-go-step="review">← Back to review</button>
+        </section>
+        <div class="workflow-footer" data-loaded hidden>
+          <button id="workflowBack" class="secondary" data-previous-step hidden>← Back</button>
+          <p class="hint">Returning to a step keeps your annotations. Replacing images or changing mode asks before clearing a review.</p>
         </div>
-        <h2>03 / Model</h2>
-        <label>Model<select id="model"></select></label>
-        <p id="modelInfo" class="hint"></p>
-        <button id="analyze">Analyze sequence</button
-        ><progress id="progress" value="0" max="1" hidden></progress
-        ><button id="cancel" class="secondary" hidden>Cancel analysis</button>
-        <h2>04 / Save</h2>
-        <button id="report">
-          Export {{ 'CCRT' if study == 'ccrt' else 'egg-count' }} human report ZIP</button
-        ><label><input id="datasetTest" type="checkbox" /> Export as test set (images and annotations only)</label>
-        <div id="comparisonOptions" data-ccrt><label>Shared comparison seed<input id="comparisonSeed" type="number" min="0" max="4294967295" step="1" value="2026" /></label><label>Poor-pose well ID (optional)<input id="poorWell" placeholder="e.g. W3" /></label><label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label><p class="hint">Same saved selections for every model: all annotated wells; 2 × 50, 5 × 25, 10 × 10, 20 × 5 and 30 × 2 random wells. Budgets larger than the annotated pool are reported as skipped. Partial annotations are supported.</p></div>
-        <button id="training" class="secondary">
-          Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP
-        </button>
-        <p class="hint">
-          Reports include readable results, summaries and a numbered location
-          map. Training datasets include original images, masked crops,
-          annotations and a Python loader. Only manual labels become training
-          targets. Coma/awake requires confirmed single occupancy; explicit Empty supplies an occupancy target. Uncertain, partial or unreviewed cases remain flagged for
-          review.
-        </p>
-        <button id="machine" class="secondary">Export machine analysis ZIP</button>
-        <button id="json" class="secondary">Save project backup JSON</button
-        ><button id="csv" class="secondary">Export readable results CSV</button
-        ><button id="importButton" class="secondary">
-          Restore JSON project</button
-        ><input id="import" type="file" accept="application/json" hidden /><button id="importReportButton" class="secondary">Import report / training ZIP or JSON</button><input id="importReport" type="file" accept=".zip,.json,application/zip,application/json" hidden />
-        <p class="hint">
-          Export before leaving. Restore by selecting the same image files, then
-          importing JSON. Images are not embedded.
-        </p>
       </aside>
       <section class="workspace">
         <div id="status" role="status">
           Choose a folder or image files to begin.
         </div>
-        <div class="panel">
+        <progress id="progress" value="0" max="1" hidden aria-label="Operation progress"></progress>
+        <button id="cancel" class="secondary" hidden>Cancel operation</button>
+        <div class="panel" id="imagePanel" data-loaded hidden>
           <div class="panel-title">
             <h2>Image workspace</h2>
-            <span data-ccrt class="legend"
+            <span data-ccrt data-workflow-stages="review export" class="legend"
               ><i class="coma"></i> Coma <i class="awake"></i> Awake
               <i class="unknown"></i> Uncertain / unlabeled <i class="empty"></i> Empty (E) <span style="color:#dc70ff">! Multiple individuals</span></span
             >
           </div>
-          <div class="proposal-tools" data-geometry>
+          <div class="proposal-tools" data-geometry data-workflow-stages="wells" data-wells>
             <label
               >{{ 'Detected / drawn wells' if study == 'ccrt' else 'Counting regions on this image' }}<select id="proposalSelect">
                 <option value="">Select a well</option>
@@ -211,13 +193,13 @@
               removes the selected well.</span
             >
           </div>
-          <p class="hint" id="reviewGuide">
+          <p class="hint" id="reviewGuide" data-workflow-stages="wells">
             Define wells on the first frame; keep their IDs, align or edit each
             later frame, approve stable boundaries, then annotate states. Training
             exports use that frame's boundary, not screenshots.
           </p>
-<button data-geometry id="confirmSequence" data-sequence class="secondary">Approve stable boundaries for entire sequence</button>
-          <button data-geometry id="confirmFrame" class="secondary">
+<button data-workflow-stages="wells" data-wells data-geometry id="confirmSequence" data-sequence class="secondary">Approve stable boundaries for entire sequence</button>
+          <button data-workflow-stages="wells" data-wells data-geometry id="confirmFrame" class="secondary">
             Confirm this frame’s boundaries
           </button>
           <div class="canvas-wrap">
@@ -256,31 +238,36 @@
           </div>
           <p id="frameName" class="hint"></p>
         </div>
-        <div class="panel">
+        <div class="panel" id="selectionPanel" data-workflow-stages="wells review" data-wells hidden>
           <div class="panel-title">
             <h2>{{ 'Selected well' if study == 'ccrt' else 'Selected counting region' }}</h2>
             <select id="wellSelect" data-geometry aria-label="Select well">
               <option value="">No well selected</option>
             </select>
           </div>
-          <div class="editor" data-geometry>
+          <div class="editor" data-selected data-geometry data-workflow-stages="wells">
             <label
               >{{ 'Well identity' if study == 'ccrt' else 'Region identity' }}<input id="wellName" placeholder="e.g. A3" /></label
-            ><label data-ccrt
+            ><label data-sequence>Boundary approval<select id="boundaryApproval"><option value="sequence">Whole sequence (stable position)</option><option value="frame">Current frame only</option></select></label><button id="confirm" class="secondary">Confirm boundary</button
+            ><button id="delete" class="danger">Delete well</button>
+          </div>
+          <div class="editor" data-selected data-workflow-stages="review"><label data-ccrt
               >Occupancy<select id="occupancy">
                 <option value="unknown">Not checked</option>
                 <option value="empty">Empty</option>
                 <option value="single">Not empty — one individual</option>
                 <option value="multiple">More than one — protocol violation</option>
                 <option value="obscured">Obscured / unreliable</option>
-              </select></label
-            ><label data-sequence>Boundary approval<select id="boundaryApproval"><option value="sequence">Whole sequence (stable position)</option><option value="frame">Current frame only</option></select></label><button id="confirm" class="secondary">Confirm boundary</button
-            ><button id="delete" class="danger">Delete well</button>
-          </div>
-          <button id="confirmSingles" class="secondary" data-ccrt>Confirm unchecked wells contain one individual</button>
-          <p id="wellProgress" class="hint" data-sequence></p><div class="quick-labels" data-sequence><button id="nextBoundary" class="secondary">Next unreviewed boundary</button><button id="nextLabel" class="secondary">Next unlabeled frame</button></div>
-          <div id="prediction">No well selected.</div>
-          <div class="editor">
+              </select></label></div>
+          <button data-workflow-stages="review" id="confirmSingles" class="secondary" data-ccrt>Confirm unchecked wells contain one individual</button>
+          <p id="wellProgress" class="hint" data-sequence></p><div class="quick-labels" data-sequence><button data-workflow-stages="wells" id="nextBoundary" class="secondary">Next unreviewed boundary</button><button data-workflow-stages="review" id="nextLabel" class="secondary">Next unlabeled frame</button></div>
+          <div id="prediction" data-workflow-stages="review">No well selected.</div>
+          <details id="predictionDetails" data-workflow-stages="review" hidden>
+            <summary>Model prediction details</summary>
+            <p id="predictionInfo" class="hint"></p>
+          </details>
+          {% if study == 'ccrt' %}<details id="annotationOptions" data-workflow-stages="review"><summary>Notes and detailed annotation</summary>{% endif %}
+          <div class="editor" data-workflow-stages="review">
             <label data-ccrt
               >Manual state<select id="correction">
                 <option value="">No override</option>
@@ -304,7 +291,8 @@
               Clear annotation
             </button>
           </div>
-          <div class="range-labels" data-ccrt>
+          {% if study == 'ccrt' %}</details>{% endif %}
+          <div class="range-labels" data-ccrt data-workflow-stages="review">
             <div class="quick-labels">
               <button id="labelComa" class="state-coma">
                 Coma — this frame</button
@@ -321,7 +309,7 @@
                 Awake from this frame onward
               </button>
             </div>
-            <div class="editor" data-sequence>
+            <details id="rangeOptions" data-sequence><summary>Label a custom frame range</summary><div class="editor">
               <label
                 >From frame<input
                   id="rangeStart"
@@ -341,7 +329,7 @@
                   <option value="unknown">Uncertain</option>
                 </select></label
               ><button id="applyRange">Label range</button>
-            </div>
+            </div></details>
             <button id="undoLabels" class="secondary" disabled>
               Undo last range / quick label
             </button>
@@ -351,7 +339,7 @@
               uncertain.
             </p>
           </div>
-          <div class="previews">
+          <div class="previews" data-workflow-stages="review">
             <figure data-sequence>
               <figcaption>T−1</figcaption>
               <canvas id="prevCrop" width="260" height="180"></canvas>
@@ -366,7 +354,7 @@
             </figure>
           </div>
         </div>
-        <div class="panel">
+        <div class="panel" id="summaryPanel" data-workflow-stages="export" data-project-wells hidden>
           <div class="panel-title">
             <h2 id="summaryTitle">Analysis summary</h2>
             <span class="hint">Effective states include manual overrides</span>

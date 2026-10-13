@@ -1,3 +1,4 @@
+const { step, openOptions } = require("./workflow-helpers.cjs");
 /* Validate separate study pages and actual ZIP image/annotation/loader exports. */
 const { chromium } = require("playwright"),
   assert = require("node:assert/strict"),
@@ -36,6 +37,9 @@ for i in range(3):
     await page.waitForFunction((i) => index === i && image !== null, i);
   }
   async function download(id, name) {
+    await step(page, "export");
+    if (id === "training") await openOptions(page, "trainingOptions");
+    if (id === "machine") await openOptions(page, "otherExports");
     const promise = page.waitForEvent("download", { timeout: 60000 });
     await page.locator("#" + id).click();
     const d = await promise;
@@ -47,11 +51,11 @@ for i in range(3):
     () => document.querySelector("#model").options.length > 0,
   );
   assert.equal(await page.locator("#eggCount").isVisible(), false);
-  assert.equal(await page.locator("#interval").isVisible(), true);
+  assert.equal(await page.locator("#interval").isVisible(), false);
   await page.locator("#files").setInputFiles(files);
   await page.waitForFunction(() => image !== null);
-  await page.locator("#experiment").fill("synthetic-ccrt-run");
-  await page.locator("#experiment").press("Tab");
+  assert.equal(await page.locator("#interval").isVisible(), true);
+  await step(page, "wells");
   await page.locator("#tool").selectOption("polygon");
   await page.locator("#canvas").scrollIntoViewIfNeeded();
   const box = await page.locator("#canvas").boundingBox();
@@ -63,9 +67,12 @@ for i in range(3):
     await page.mouse.click(box.x + x * box.width, box.y + y * box.height);
   await page.mouse.dblclick(box.x + 0.2 * box.width, box.y + 0.8 * box.height);
   await page.waitForFunction(() => project.wells.length === 1);
+  await step(page, "review");
   await page.locator("#occupancy").selectOption("single");
+  await step(page, "wells");
   await page.locator("#nextBoundary").click();
   await page.waitForFunction(() => index === 1 && image !== null);
+  await step(page, "review");
   await page.locator("#nextLabel").click();
   await page.waitForFunction(() => index === 2 && image !== null);
   await frame(1);
@@ -91,6 +98,7 @@ for i in range(3):
     "awake",
   ]);
   await page.locator("#labelUncertain").click();
+  await step(page, "wells");
   await page.locator("#tool").selectOption("vertex");
   await page.locator("#canvas").scrollIntoViewIfNeeded();
   const b = await page.locator("#canvas").boundingBox();
@@ -102,12 +110,18 @@ for i in range(3):
     await frame(i);
     await page.locator("#confirmFrame").click();
   }
+  await step(page, "images");
+  await openOptions(page, "timingOptions");
   await page.locator("#recoveryDelay").fill("5");
   await page.locator("#recoveryDelay").press("Tab");
   assert.equal(
     await page.evaluate(() => project.time_origin.offset_seconds),
     5,
   );
+  await step(page, "export");
+  await openOptions(page, "trainingOptions");
+  await page.locator("#experiment").fill("synthetic-ccrt-run");
+  await page.locator("#experiment").press("Tab");
   await download("machine", "ccrt-machine.zip");
   await download("training", "ccrt-training.zip");
   await download("report", "ccrt-report.zip");
@@ -133,6 +147,7 @@ for i in range(3):
     path: path.join(output, "ccrt.png"),
     fullPage: true,
   });
+  await step(page, "wells");
   await page.locator("#scope").selectOption("all");
   await page.locator("#tool").selectOption("vertex");
   await page.locator("#canvas").scrollIntoViewIfNeeded();
@@ -159,6 +174,7 @@ for i in range(3):
     ),
     0,
   );
+  await step(page, "images");
   await page.locator("#mode").selectOption("single");
   assert.equal(await page.locator("#interval").isVisible(), false);
   assert.equal(await page.locator("#order").isVisible(), false);
@@ -179,6 +195,7 @@ for i in range(3):
   );
   assert.equal(await page.locator("#geometryControls").isVisible(), false);
   await page.locator("#eggScope").selectOption("areas");
+  await step(page, "wells");
   await page.locator("#tool").selectOption("region");
   await page.locator("#canvas").scrollIntoViewIfNeeded();
   const eggbox = await page.locator("#canvas").boundingBox();
@@ -196,9 +213,9 @@ for i in range(3):
   assert.equal(await page.evaluate(() => project.detection_region), null);
   await frame(0);
   assert.ok(await page.evaluate(() => project.detection_region));
+  await openOptions(page, "detectionOptions");
   await page.locator("#clearRegion").click();
-  await page.locator("#experiment").fill("synthetic-egg-run");
-  await page.locator("#experiment").press("Tab");
+  await step(page, "review");
   await page.locator("#eggCount").fill("0");
   await page.locator("#saveCorrection").click();
   await frame(1);
@@ -208,6 +225,10 @@ for i in range(3):
   await frame(0);
   assert.equal(await page.locator("#eggCount").inputValue(), "0");
   assert.equal(await page.locator("#wellSelect option").count(), 2);
+  await step(page, "export");
+  await openOptions(page, "trainingOptions");
+  await page.locator("#experiment").fill("synthetic-egg-run");
+  await page.locator("#experiment").press("Tab");
   await download("training", "egg-training.zip");
   await download("report", "egg-report.zip");
   await download("json", "egg-project.json");

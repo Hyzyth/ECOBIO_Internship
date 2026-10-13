@@ -9,7 +9,8 @@ const C = ReviewCore,
     invalid: "#dc70ff",
   },
   study = document.body.dataset.study || "ccrt";
-let lastLabelOperation = null;
+let lastLabelOperation = null,
+  workflowStage = "images";
 let project = {
     schema_version: 1,
     time_origin: { confirmed: true, offset_seconds: 0 },
@@ -48,6 +49,87 @@ function stop() {
   clearInterval(playing);
   playing = null;
   $("play").textContent = "Play";
+}
+function workflowSteps() {
+  return study === "eggs" && $("eggScope").value === "image"
+    ? ["images", "review", "export"]
+    : ["images", "wells", "review", "export"];
+}
+function canEnterStep(step) {
+  return (
+    workflowSteps().includes(step) &&
+    (step === "images" ||
+      (files.length > 0 && (step === "wells" || project.wells.length > 0)))
+  );
+}
+function goToStep(step) {
+  if (busy || !canEnterStep(step)) return;
+  stop();
+  endDrag();
+  draft = [];
+  workflowStage = step;
+  // Selecting a well during review must not accidentally move its boundary.
+  if (step !== "wells") $("tool").value = "select";
+  updateContext();
+  draw();
+  $(
+    {
+      images: "inputHeading",
+      wells: "wellsHeading",
+      review: "reviewHeading",
+      export: "exportHeading",
+    }[step],
+  ).focus({ preventScroll: true });
+}
+function updateWorkflow() {
+  const steps = workflowSteps(),
+    labels = {
+      images: "Images",
+      wells: study === "ccrt" ? "Wells" : "Areas",
+      review: study === "ccrt" ? "Review" : "Count",
+      export: "Export",
+    };
+  if (!canEnterStep(workflowStage))
+    workflowStage =
+      files.length && steps.includes("wells") ? "wells" : "images";
+  document.body.dataset.workflow = workflowStage;
+  document.querySelectorAll("[data-step]").forEach((button) => {
+    const step = button.dataset.step;
+    button.hidden = !steps.includes(step);
+    button.disabled = busy || !canEnterStep(step);
+    button.textContent = `${steps.indexOf(step) + 1} · ${labels[step]}`;
+    if (step === workflowStage) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  });
+  const next = steps[steps.indexOf(workflowStage) + 1],
+    previous = steps[steps.indexOf(workflowStage) - 1];
+  document.querySelectorAll("[data-next-step]").forEach((button) => {
+    button.disabled = busy || !canEnterStep(next);
+    button.textContent = `Continue to ${labels[next]?.toLowerCase() || "export"} →`;
+  });
+  $("workflowBack").hidden = !previous;
+  $("workflowBack").disabled = busy;
+  $("workflowBack").textContent =
+    `← Back to ${labels[previous]?.toLowerCase() || "images"}`;
+  document.querySelectorAll("[data-go-step]").forEach((button) => {
+    button.disabled = busy || !canEnterStep(button.dataset.goStep);
+  });
+  $("workflowHint").textContent = {
+    images: !files.length
+      ? "Start by choosing your images. Later steps become available as you go."
+      : project.mode === "sequence" && files.length > 1
+        ? "Check image order and frame interval, then continue. You can also resume a saved review."
+        : "Check the selected images, then continue. You can also resume a saved review.",
+    wells: !project.wells.length
+      ? "Suggest or draw boundaries before continuing. Nothing is classified at this step."
+      : "Check the boundaries and approve stable positions, then continue. You can return here at any time.",
+    review:
+      study === "ccrt"
+        ? "Check occupancy, then label states. Model predictions are optional; partial annotation is supported."
+        : "Count each independent image or area. No sequence timing or model selection is required.",
+    export:
+      "Choose a readable report or a backup. Dataset and machine exports are optional.",
+  }[workflowStage];
 }
 function pointsPath(context, points, w, h) {
   context.beginPath();
@@ -330,9 +412,14 @@ function updateDetails() {
     : "Select a well to review and label its sequence.";
   $("undoLabels").disabled = busy || !lastLabelOperation;
   $("rangeStart").max = $("rangeEnd").max = project.frames.length || 1;
+  const state =
+    study === "ccrt" ? C.effective(r, w).toUpperCase() : "EGG COUNT";
   $("prediction").textContent = w
-    ? `${w.id} · ${study === "ccrt" ? (w.occupancy === "empty" ? "EMPTY" : r.correction?.state === "unknown" ? "UNCERTAIN" : C.effective(r, study === "ccrt" ? w : null).toUpperCase()) : "EGG COUNT"} · Model: ${r.model?.name || "No prediction"} ${r.model?.version || ""} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}${r.correction ? " · Manual annotation applied" : ""}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${w.detection.review_required || w.review_frames?.includes(index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
+    ? `${w.id} · ${state}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${r.correction ? " · Manual annotation applied" : ""}${r.confidence == null ? "" : " · Model confidence: " + Math.round(r.confidence * 100) + "%"}${C.boundaryNeedsReview(w, index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
+  $("predictionInfo").textContent = r.model
+    ? `${r.model.name} · Version: ${r.model.version} · Model state: ${(r.prediction || "unknown").toUpperCase()} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}`
+    : "";
   renderSummary();
   updateContext();
 }
@@ -344,7 +431,9 @@ function renderSummary() {
   const head = document.createElement("tr");
   Object.keys(rows[0] || {}).forEach((key) => {
     const th = document.createElement("th");
-    th.textContent = key;
+    th.textContent = key
+      .replace(/_/g, " ")
+      .replace(/^./, (c) => c.toUpperCase());
     head.append(th);
   });
   const temporal = study === "ccrt" && project.mode === "sequence";
@@ -468,6 +557,7 @@ async function loadFiles(input) {
   }
   stop();
   urls.forEach(URL.revokeObjectURL);
+  workflowStage = "images";
   files = C.orderFiles(list, $("order").value);
   if ($("mode").value === "single" && files.length > 1) {
     files = files.slice(0, 1);
@@ -572,6 +662,9 @@ function setBusy(value) {
     "poorWell",
     "richWell",
     "experiment",
+    "saveDraft",
+    "drawWell",
+    "setRegion",
   ].forEach((id) => ($(id).disabled = value));
   $("cancel").hidden = !value;
   $("progress").hidden = !value;
@@ -596,6 +689,7 @@ async function detect() {
   )
     return;
   stop();
+  cancelled = false;
   setBusy(true);
   try {
     const form = new FormData();
@@ -609,6 +703,10 @@ async function detect() {
     if (project.detection_region)
       form.append("region", JSON.stringify(project.detection_region));
     const data = await post("/api/detect", form);
+    if (cancelled)
+      return status(
+        "Detection cancelled. Existing boundaries and annotations were retained.",
+      );
     if (!data.wells.length) {
       status(
         "No matching wells found. Existing wells are preserved. Try a diameter override, another detection method, or draw boundaries manually.",
@@ -689,7 +787,7 @@ canvas.addEventListener("pointerdown", (e) => {
     return;
   stop();
   const p = position(e),
-    tool = $("tool").value;
+    tool = workflowStage === "wells" ? $("tool").value : "select";
   if (tool === "polygon") return;
   if (tool === "region") {
     drag = { type: "region", start: p, pending: null };
@@ -722,7 +820,7 @@ canvas.addEventListener("pointerdown", (e) => {
       if (w) removeSelectedWell();
       return;
     }
-    if (w)
+    if (w && workflowStage === "wells")
       drag = {
         well: w,
         points: C.geometry(w, index).map((p) => [...p]),
@@ -801,7 +899,14 @@ function endDrag() {
 canvas.addEventListener("pointerup", endDrag);
 canvas.addEventListener("pointercancel", endDrag);
 canvas.addEventListener("click", (e) => {
-  if (!image || busy || $("tool").value !== "polygon" || e.detail !== 1) return;
+  if (
+    !image ||
+    busy ||
+    workflowStage !== "wells" ||
+    $("tool").value !== "polygon" ||
+    e.detail !== 1
+  )
+    return;
   const p = position(e);
   const same = (q) =>
     q &&
@@ -816,7 +921,13 @@ canvas.addEventListener("click", (e) => {
   draw();
 });
 canvas.addEventListener("dblclick", () => {
-  if (busy || $("tool").value !== "polygon" || draft.length < 3) return;
+  if (
+    busy ||
+    workflowStage !== "wells" ||
+    $("tool").value !== "polygon" ||
+    draft.length < 3
+  )
+    return;
   const xs = draft.map((p) => p[0]),
     ys = draft.map((p) => p[1]);
   if (
@@ -838,7 +949,12 @@ document.addEventListener("keydown", (e) => {
     draw();
   }
   if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
-  if ((e.key === "Delete" || e.key === "Backspace") && selected && !busy) {
+  if (
+    (e.key === "Delete" || e.key === "Backspace") &&
+    selected &&
+    !busy &&
+    workflowStage === "wells"
+  ) {
     e.preventDefault();
     removeSelectedWell();
   }
@@ -870,6 +986,7 @@ $("mode").onchange = () => {
   stop();
   urls.forEach(URL.revokeObjectURL);
   files = [];
+  workflowStage = "images";
   urls = [];
   index = 0;
   selected = null;
@@ -899,9 +1016,8 @@ $("mode").onchange = () => {
 };
 $("order").onchange = () => {
   if (files.length) {
-    $("order").value = project.order || "name";
     status(
-      "Choose ordering before loading images. Reload to reorder without misaligning annotations.",
+      "This ordering applies to the next image load. The current image order and annotations are unchanged. Save your review before loading replacement images.",
     );
   }
 };
@@ -1237,6 +1353,7 @@ async function importSaved(file) {
     $("eggScope").value = project.wells.some((w) => !C.imageArea(w))
       ? "areas"
       : "image";
+    workflowStage = project.wells.length ? "review" : "images";
     await renderFrame();
   } catch (error) {
     status(error.message);
@@ -1384,6 +1501,7 @@ $("clearRegion").onclick = () => {
   project.detection_region = null;
   if (study === "eggs") delete project.detection_regions?.[index];
   history("clear-detection-region", {});
+  updateContext();
   draw();
 };
 $("confirmFrame").onclick = () => {
@@ -1406,11 +1524,13 @@ $("confirmFrame").onclick = () => {
   );
 };
 function updateContext() {
-  const sequence = study === "ccrt" && $("mode").value === "sequence",
-    multiple = $("mode").value !== "single";
+  updateWorkflow();
+  const sequence =
+      study === "ccrt" && $("mode").value === "sequence" && files.length > 1,
+    multiple = $("mode").value !== "single" && files.length > 1;
   document
     .querySelectorAll(
-      "[data-ccrt],[data-eggs],[data-sequence],[data-multiple],[data-geometry]",
+      "[data-ccrt],[data-eggs],[data-sequence],[data-multiple],[data-multiple-mode],[data-geometry],[data-loaded],[data-wells],[data-project-wells],[data-selected],[data-workflow-stages]",
     )
     .forEach((el) => {
       el.hidden =
@@ -1418,9 +1538,17 @@ function updateContext() {
         (el.hasAttribute("data-eggs") && study !== "eggs") ||
         (el.hasAttribute("data-sequence") && !sequence) ||
         (el.hasAttribute("data-multiple") && !multiple) ||
+        (el.hasAttribute("data-multiple-mode") &&
+          $("mode").value === "single") ||
+        (el.hasAttribute("data-loaded") && !files.length) ||
+        (el.hasAttribute("data-wells") && !visibleWells().length) ||
+        (el.hasAttribute("data-project-wells") && !project.wells.length) ||
+        (el.hasAttribute("data-selected") && !selectedWell()) ||
+        (el.hasAttribute("data-workflow-stages") &&
+          !el.dataset.workflowStages.split(" ").includes(workflowStage)) ||
         (el.hasAttribute("data-geometry") &&
-          study === "eggs" &&
-          $("eggScope").value === "image");
+          (!files.length ||
+            (study === "eggs" && $("eggScope").value === "image")));
     });
   document
     .querySelector(".previews")
@@ -1457,10 +1585,36 @@ function updateContext() {
   $("align").disabled = busy || !sequence || index === 0 || files.length < 2;
   $("alignSequence").disabled = busy || !sequence || files.length < 2;
   $("analyze").disabled = busy || $("model").value === "manual";
+  $("order").disabled = busy;
+  $("confirmSingles").hidden =
+    study !== "ccrt" ||
+    workflowStage !== "review" ||
+    !project.wells.some((w) => !w.occupancy || w.occupancy === "unknown");
+  $("nextBoundary").hidden =
+    !sequence ||
+    workflowStage !== "wells" ||
+    !selectedWell() ||
+    !project.frames.some((_, i) => C.boundaryNeedsReview(selectedWell(), i));
+  $("nextLabel").hidden =
+    !sequence ||
+    workflowStage !== "review" ||
+    !selectedWell() ||
+    ["empty", "multiple"].includes(selectedWell().occupancy) ||
+    !project.frames.some(
+      (_, i) => !project.records[C.key(i, selected)]?.correction?.state,
+    );
+  $("predictionDetails").hidden =
+    workflowStage !== "review" || !selectedWell() || !record().model;
+
+  $("modelOptions").hidden = !models.some((model) => model.id !== "manual");
+  $("clearRegion").hidden = !project.detection_region;
   $("comparisonOptions").hidden = $("datasetTest").checked || study !== "ccrt";
   $("training").textContent = $("datasetTest").checked
     ? "Export test dataset ZIP"
     : `Export ${study === "ccrt" ? "CCRT" : "egg"} training dataset ZIP`;
+  $("datasetHint").textContent = $("datasetTest").checked
+    ? "Evaluation images and annotations only. Unannotated areas are not scored. Save a project backup separately to resume editing."
+    : "Original images, masked crops and manual targets. Partial annotation is supported; uncertain or unreviewed samples remain flagged. Model predictions are not training labels.";
   $("analyze").hidden = $("model").value === "manual";
   $("detectionHint").textContent =
     $("detectionMethod").value === "contours"
@@ -1837,3 +1991,32 @@ $("eggScope").onchange = () => {
 };
 
 $("datasetTest").onchange = updateContext;
+
+document.querySelectorAll("[data-step],[data-go-step]").forEach((button) => {
+  button.onclick = () => goToStep(button.dataset.step || button.dataset.goStep);
+});
+document.querySelectorAll("[data-next-step]").forEach((button) => {
+  button.onclick = () => {
+    const steps = workflowSteps();
+    goToStep(steps[steps.indexOf(workflowStage) + 1]);
+  };
+});
+$("workflowBack").onclick = () => {
+  const steps = workflowSteps();
+  goToStep(steps[steps.indexOf(workflowStage) - 1]);
+};
+$("saveDraft").onclick = () => $("json").onclick();
+$("drawWell").onclick = () => {
+  $("tool").value = "polygon";
+  draft = [];
+  canvas.focus();
+  draw();
+  status(
+    "Click around the boundary, then double-click to finish. Escape cancels the unfinished polygon.",
+  );
+};
+$("setRegion").onclick = () => {
+  $("tool").value = "region";
+  canvas.focus();
+  status("Drag a rectangle around the area where wells should be detected.");
+};
