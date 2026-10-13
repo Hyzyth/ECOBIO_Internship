@@ -466,3 +466,8 @@ body[data-study="eggs"] [data-ccrt] {
 .empty {
   background: #00cfff;
 }
+
+.unsure {
+  background: #ffd34d;
+  color: #251e00;
+}

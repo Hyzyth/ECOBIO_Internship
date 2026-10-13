@@ -49,7 +49,10 @@ def predict():
     if not image:
         return jsonify(error='Select an image first.'), 400
     try:
-        return jsonify(analyze(request.form.get('model'), image.read(), request.form.get('wells', '[]')))
+        return jsonify(analyze(
+            request.form.get('model'), image.read(), request.form.get('wells', '[]'),
+            request.form.get('sequence_session'), request.form.get('frame_index')
+        ))
     except (ValueError, RuntimeError) as exc:
         return jsonify(error=str(exc)), 400
 @app.errorhandler(413)

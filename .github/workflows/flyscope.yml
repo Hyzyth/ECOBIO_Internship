@@ -60,3 +60,65 @@ jobs:
           curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models
           node tests/workflow-browser.cjs
           node tests/studies-browser.cjs
+
+  three-model-runtime:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: CCRT/logiciel-v2_2
+    env:
+      QT_QPA_PLATFORM: offscreen
+      MPLCONFIGDIR: /tmp/flyscope-mpl
+      XDG_CACHE_HOME: /tmp/flyscope-cache
+      TF_CPP_MIN_LOG_LEVEL: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10.7"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install isolated app, suite and pose runtimes
+        run: |
+          python -c 'import sys; assert sys.version_info[:3] == (3, 10, 7), sys.version'
+          python -m pip install -r requirements.txt
+          python -m venv "$RUNNER_TEMP/suite"
+          python -m venv "$RUNNER_TEMP/sleap"
+          "$RUNNER_TEMP/suite/bin/python" -m pip install pip==24.0
+          "$RUNNER_TEMP/suite/bin/python" -m pip install -r requirements-suite.txt
+          "$RUNNER_TEMP/sleap/bin/python" -m pip install pip==24.0
+          "$RUNNER_TEMP/sleap/bin/python" -m pip install -r requirements-sleap.txt
+          "$RUNNER_TEMP/suite/bin/python" -m pip check
+          "$RUNNER_TEMP/sleap/bin/python" -m pip check
+          echo "FLYSCOPE_SUITE_PYTHON=$RUNNER_TEMP/suite/bin/python" >> "$GITHUB_ENV"
+          echo "FLYSCOPE_SLEAP_PYTHON=$RUNNER_TEMP/sleap/bin/python" >> "$GITHUB_ENV"
+      - name: Download the creator's native anatomical labels
+        run: |
+          mkdir -p "$RUNNER_TEMP/pose-data"
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/pose-data/dataset.zip" https://github.com/talmolab/sleap-datasets/releases/download/dm-courtship-v1/drosophila-melanogaster-courtship.zip
+          unzip -q "$RUNNER_TEMP/pose-data/dataset.zip" -d "$RUNNER_TEMP/pose-data"
+      - name: Check contracts and actually train all three model families
+        run: |
+          "$FLYSCOPE_SUITE_PYTHON" -m unittest tests.suite_contracts -v
+          "$FLYSCOPE_SLEAP_PYTHON" tools/sleap_pose.py train --labels "$RUNNER_TEMP/pose-data/drosophila-melanogaster-courtship/courtship_labels.slp" --output "$RUNNER_TEMP/pose-smoke" --epochs 1 --max-examples 8 --size 64 --filters 8 --batch-size 2
+          "$FLYSCOPE_SUITE_PYTHON" tools/validate_model_suite.py --pose-model "$RUNNER_TEMP/pose-smoke" --output "$RUNNER_TEMP/suite-smoke"
+      - name: Check actual checkpoint inference through the app and exports
+        env:
+          NODE_PATH: ${{ runner.temp }}/suite-browser/node_modules
+          SUITE_SMOKE_DIR: ${{ runner.temp }}/suite-smoke
+          FLYSCOPE_SUITE_MODELS_DIR: ${{ runner.temp }}/suite-smoke/results
+        run: |
+          npm install --prefix "$RUNNER_TEMP/suite-browser" playwright@1.63.0
+          node "$RUNNER_TEMP/suite-browser/node_modules/playwright/cli.js" install --with-deps chromium
+          export CHROMIUM_PATH="$(node -p 'require("playwright").chromium.executablePath()')"
+          python app.py > "$RUNNER_TEMP/suite-server.log" 2>&1 &
+          suite_app_pid=$!
+          trap 'kill "$suite_app_pid"' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models
+          node tests/model-suite-browser.cjs

@@ -160,10 +160,9 @@
     const entries = [],
       images = [],
       task = ReviewCore.taskOf(project),
-      frames =
-        role === "test"
-          ? project.frames.map((_, i) => i)
-          : [...new Set(annotations.map((a) => a.frame_index))];
+      // Temporal models need contiguous context even when only a few frames
+      // have labels. Unlabeled images never become supervised targets.
+      frames = ReviewCore.analysisIndices(project);
     for (const [n, i] of frames.entries()) {
       if (cancelled())
         throw Error(
@@ -184,6 +183,8 @@
         ).join("");
         images.push({
           frame_number: i + 1,
+          ...ReviewCore.frameTiming(project, i),
+          frame_index: i,
           original_filename: project.frames[i].name,
           path: imagePath,
           width: image.width,
@@ -269,26 +270,47 @@
         task === "eggs"
           ? "Provisional integer count; independent image or optional region"
           : "Per-frame well state",
+      analysis_start_index: ReviewCore.analysisStart(project),
+      input_kind: project.input_kind || "raw",
+      source_first_frame_number:
+        project.source_first_frame_number === null
+          ? null
+          : project.source_first_frame_number || 1,
+      species: project.species || null,
+      recovery_policy: project.recovery_policy || {
+        confidence_threshold: 0.8,
+        awake_consecutive_frames: 3,
+      },
       images,
       annotations,
       wells: project.wells.map((w) => ({
         well_id: w.id,
         well_uid: w.uid,
         occupancy: w.occupancy || "unknown",
+        species:
+          w.occupancy === "empty" ? null : w.species || project.species || null,
         frames: project.frames
           .map((_, i) => ({
             frame_index: i,
             points: ReviewCore.geometry(w, i),
             active: ReviewCore.activeWell(w, i),
+            boundary_reviewed: !ReviewCore.boundaryNeedsReview(w, i),
             partial: w.partial_frames?.[i] ?? !!w.detection.partial,
           }))
-          .filter((f) => f.active),
+          .filter(
+            (f) =>
+              f.active && f.frame_index >= ReviewCore.analysisStart(project),
+          ),
       })),
       coverage: {
         detected_wells: project.wells.length,
         expected_samples: project.frames.reduce(
           (n, _, i) =>
-            n + project.wells.filter((w) => ReviewCore.activeWell(w, i)).length,
+            n +
+            (i < ReviewCore.analysisStart(project)
+              ? 0
+              : project.wells.filter((w) => ReviewCore.activeWell(w, i))
+                  .length),
           0,
         ),
         annotated_samples: annotations.length,
@@ -302,6 +324,7 @@
         ).size,
       },
       all_frame_count: project.frames.length,
+      analysis_frame_count: ReviewCore.analysisIndices(project).length,
       annotated_sample_count: annotations.length,
       eligible_sample_count: annotations.filter((a) => a.eligible_for_training)
         .length,

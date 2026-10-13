@@ -17,7 +17,12 @@
     if (!Number.isInteger(seed) || seed < 0 || seed > 4294967295)
       throw Error("Use a seed between 0 and 4294967295.");
     const labels = manifest.annotations.filter((a) => a.eligible_for_training),
-      pool = [...new Set(labels.map((a) => a.well_uid))].sort();
+      pool = [...new Set(labels.map((a) => a.well_uid))].sort(),
+      individuals = pool.filter((uid) =>
+        (manifest.wells || []).some(
+          (w) => w.well_uid === uid && w.occupancy === "single",
+        ),
+      );
     if (!pool.length)
       throw Error(
         "No eligible manual annotations. Confirm occupancy and boundaries first.",
@@ -35,11 +40,10 @@
       });
     runs.push(make("all-annotated-wells", pool, seed));
     const budgets = options.budgets || [
-      { wells: 50, repeats: 2 },
-      { wells: 25, repeats: 5 },
-      { wells: 10, repeats: 10 },
-      { wells: 5, repeats: 20 },
-      { wells: 2, repeats: 30 },
+      { wells: 25, repeats: 2 },
+      { wells: 10, repeats: 5 },
+      { wells: 5, repeats: 10 },
+      { wells: 2, repeats: 20 },
     ];
     for (const budget of budgets) {
       if (
@@ -50,17 +54,17 @@
         budget.repeats > 1000
       )
         throw Error("Invalid well budget/repeat count.");
-      if (budget.wells > pool.length) {
+      if (budget.wells > individuals.length) {
         skipped.push({
           ...budget,
-          reason: `Only ${pool.length} wells have eligible labels`,
+          reason: `Only ${individuals.length} single-individual wells have eligible labels`,
         });
         continue;
       }
       for (let n = 0; n < budget.repeats; n++) {
         const runSeed = (seed + Math.imul(budget.wells, 100003) + n) >>> 0,
           rand = random(runSeed),
-          wells = [...pool];
+          wells = [...individuals];
         for (let i = wells.length - 1; i > 0; i--) {
           const j = Math.floor(rand() * (i + 1));
           [wells[i], wells[j]] = [wells[j], wells[i]];
@@ -95,6 +99,8 @@
       seed,
       experiment_id: manifest.experiment_id,
       selection_unit: "well",
+      protocol: "full-grid-plus-25x2-10x5-5x10-2x20-poor-rich-v2",
+      eligible_individual_count: individuals.length,
       eligible_well_count: pool.length,
       detected_well_count: manifest.coverage?.detected_wells ?? pool.length,
       partial_annotations_supported: true,

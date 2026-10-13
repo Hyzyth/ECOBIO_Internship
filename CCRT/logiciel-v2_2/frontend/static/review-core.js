@@ -91,6 +91,141 @@
   function key(frame, well) {
     return `${frame}:${well}`;
   }
+  function analysisStart(project) {
+    return taskOf(project) === "ccrt" && project.mode === "sequence"
+      ? project.analysis_start_index || 0
+      : 0;
+  }
+  function analysisIndices(project) {
+    return project.frames
+      .map((_, i) => i)
+      .filter((i) => i >= analysisStart(project));
+  }
+  function frameTiming(project, index) {
+    const origin = project.time_origin || {
+      confirmed: true,
+      offset_seconds: 0,
+    };
+    return {
+      frame_number: index + 1,
+      frame_id: project.frames[index]?.id || null,
+      analysis_frame_number:
+        index >= analysisStart(project)
+          ? index - analysisStart(project) + 1
+          : null,
+      source_frame_number:
+        project.source_first_frame_number === null
+          ? null
+          : (project.source_first_frame_number || 1) + index,
+      excluded_setup_frame: index < analysisStart(project),
+      timer_seconds:
+        project.mode === "sequence" && origin.confirmed
+          ? origin.offset_seconds + index * project.interval
+          : null,
+    };
+  }
+  // Unsure is an abstention, not a biological target. Once awake is confirmed,
+  // sequence decisions stay awake; raw model outputs remain available separately.
+  function applyRecoveryPolicy(project, options = {}) {
+    const threshold =
+        options.confidence_threshold ??
+        project.recovery_policy?.confidence_threshold ??
+        0.8,
+      consecutive =
+        options.awake_consecutive_frames ??
+        project.recovery_policy?.awake_consecutive_frames ??
+        3;
+    if (
+      !Number.isFinite(threshold) ||
+      threshold < 0.5 ||
+      threshold > 1 ||
+      !Number.isInteger(consecutive) ||
+      consecutive < 1
+    )
+      throw Error("Invalid recovery confidence policy.");
+    const indices = analysisIndices(project);
+    for (const well of project.wells) {
+      let streak = 0,
+        confirmed = null,
+        onsetFrame = null,
+        source = null;
+      for (const i of indices) {
+        const r = project.records[key(i, well.uid)];
+        if (!r?.model) {
+          streak = 0;
+          confirmed = null;
+          onsetFrame = null;
+          source = null;
+          continue;
+        }
+        const identity =
+          r.analysis_session || r.model.version || r.model.id || "legacy";
+        if (identity !== source) {
+          streak = 0;
+          confirmed = null;
+          onsetFrame = null;
+          source = identity;
+        }
+        r.raw_prediction ??= r.prediction;
+        r.raw_confidence ??= r.confidence;
+        const raw = r.raw_prediction,
+          score = r.raw_confidence;
+        r.confidence =
+          (well.partial_frames?.[i] ?? well.detection?.partial) ? null : score;
+        if (confirmed !== null) {
+          r.prediction = "awake";
+          r.confidence = null;
+          r.recovery_decision = {
+            onset_frame_index: onsetFrame,
+            confirmed_frame_index: confirmed,
+            carried_forward: true,
+            confidence_threshold: threshold,
+            awake_consecutive_frames: consecutive,
+          };
+          continue;
+        }
+        const confident =
+          Number.isFinite(score) &&
+          score >= threshold &&
+          !(well.partial_frames?.[i] ?? well.detection?.partial);
+        if (raw === "empty") {
+          r.prediction = score == null || confident ? "empty" : "unsure";
+          streak = 0;
+        } else if (raw === "awake" && confident) {
+          streak++;
+          if (project.mode !== "sequence" || streak >= consecutive) {
+            r.prediction = "awake";
+            confirmed = i;
+            onsetFrame = i - streak + 1;
+            // Offline review can identify the onset of a sustained run only
+            // after confirmation. Preserve the later confirmation index too.
+            for (let onset = i - streak + 1; onset <= i; onset++) {
+              const candidate = project.records[key(onset, well.uid)];
+              candidate.prediction = "awake";
+              candidate.confidence = candidate.raw_confidence;
+              candidate.recovery_decision = {
+                onset_frame_index: i - streak + 1,
+                confirmed_frame_index: i,
+                carried_forward: false,
+                confidence_threshold: threshold,
+                awake_consecutive_frames: consecutive,
+              };
+            }
+          } else r.prediction = "unsure";
+        } else {
+          streak = 0;
+          r.prediction = raw === "coma" && confident ? "coma" : "unsure";
+        }
+        r.recovery_decision = {
+          onset_frame_index: onsetFrame,
+          confirmed_frame_index: confirmed,
+          carried_forward: false,
+          confidence_threshold: threshold,
+          awake_consecutive_frames: consecutive,
+        };
+      }
+    }
+  }
   function summary(project) {
     return project.wells.map((well) => {
       let awake = 0,
@@ -101,7 +236,7 @@
         transitions = 0,
         previous = null,
         confidence = [];
-      const states = project.frames.map((_, i) => {
+      const states = analysisIndices(project).map((i) => {
         const r = project.records[key(i, well.uid)],
           s = effective(r, well);
         if (s === "awake") awake++;
@@ -144,6 +279,7 @@
         const record = project.records[key(i, well.uid)] || {};
         rows.push({
           frame_number: i + 1,
+          ...frameTiming(project, i),
           frame_id: frame.id,
           filename: frame.name,
           timestamp: frame.timestamp,
@@ -152,6 +288,14 @@
           well_id: well.id,
           well_uid: well.uid,
           prediction: record.prediction || "unknown",
+          raw_prediction: record.raw_prediction ?? record.prediction ?? null,
+          analysis_session: record.analysis_session || null,
+          raw_confidence: record.raw_confidence ?? record.confidence ?? null,
+          recovery_decision: record.recovery_decision || null,
+          species:
+            well.occupancy === "empty"
+              ? null
+              : well.species || project.species || null,
           confidence: record.confidence ?? null,
           model: record.model || null,
           state_probabilities: record.state_probabilities || null,
@@ -262,6 +406,33 @@
         p.time_origin.offset_seconds < 0)
     )
       throw Error("Invalid recovery time origin.");
+    if (
+      p.analysis_start_index != null &&
+      (!Number.isInteger(p.analysis_start_index) ||
+        p.analysis_start_index < 0 ||
+        p.analysis_start_index >= p.frames.length)
+    )
+      throw Error("Invalid analysis start frame.");
+    if (
+      p.source_first_frame_number != null &&
+      (!Number.isInteger(p.source_first_frame_number) ||
+        p.source_first_frame_number < 1)
+    )
+      throw Error("Invalid source frame number.");
+    if (
+      p.species != null &&
+      (typeof p.species !== "string" || p.species.length > 200)
+    )
+      throw Error("Invalid species metadata.");
+    if (
+      p.recovery_policy != null &&
+      (!Number.isFinite(p.recovery_policy.confidence_threshold) ||
+        p.recovery_policy.confidence_threshold < 0.5 ||
+        p.recovery_policy.confidence_threshold > 1 ||
+        !Number.isInteger(p.recovery_policy.awake_consecutive_frames) ||
+        p.recovery_policy.awake_consecutive_frames < 1)
+    )
+      throw Error("Invalid recovery decision policy.");
     if (p.detection_regions != null) {
       if (
         typeof p.detection_regions !== "object" ||
@@ -322,6 +493,11 @@
       )
         throw Error("Invalid well boundaries or duplicate identities.");
       if (
+        w.species != null &&
+        (typeof w.species !== "string" || w.species.length > 200)
+      )
+        throw Error("Invalid well species metadata.");
+      if (
         w.occupancy != null &&
         !["unknown", "empty", "single", "multiple", "obscured"].includes(
           w.occupancy,
@@ -365,13 +541,20 @@
         Number(i) >= frames.length ||
         !ids.has(uid) ||
         !r ||
-        !["unknown", "coma", "awake", "empty", undefined].includes(
+        !["unknown", "coma", "awake", "empty", "unsure", undefined].includes(
           r.prediction,
         ) ||
         (r.confidence != null &&
           (!Number.isFinite(r.confidence) ||
             r.confidence < 0 ||
             r.confidence > 1)) ||
+        (r.raw_confidence != null &&
+          (!Number.isFinite(r.raw_confidence) ||
+            r.raw_confidence < 0 ||
+            r.raw_confidence > 1)) ||
+        !["unknown", "coma", "awake", "empty", "unsure", undefined].includes(
+          r.raw_prediction,
+        ) ||
         (r.correction &&
           (!["coma", "awake", "unknown", null].includes(r.correction.state) ||
             (r.correction.egg_count != null &&
@@ -461,7 +644,7 @@
     });
     return restored;
   }
-  function wellMap(project, frame = 0) {
+  function wellMap(project, frame = analysisStart(project)) {
     return project.wells
       .filter((w) => activeWell(w, frame))
       .map((w) => {
@@ -572,6 +755,7 @@
       annotations = [];
     project.frames.forEach((frame, i) =>
       project.wells.forEach((w) => {
+        if (i < analysisStart(project)) return;
         if (!activeWell(w, i)) return;
         const correction = project.records[key(i, w.uid)]?.correction;
         const manual =
@@ -589,6 +773,11 @@
           id: `f${i + 1}-${w.uid}`,
           frame_index: i,
           frame_number: i + 1,
+          ...frameTiming(project, i),
+          species:
+            w.occupancy === "empty"
+              ? null
+              : w.species || project.species || null,
           filename: frame.name,
           timestamp: frame.timestamp,
           elapsed_seconds:
@@ -655,7 +844,8 @@
       w.detection.review_required = false;
       w.review_frames = failures;
       for (let i = 0; i < project.frames.length; i++)
-        if (activeWell(w, i)) failures.includes(i) ? skipped++ : approved++;
+        if (i >= analysisStart(project) && activeWell(w, i))
+          failures.includes(i) ? skipped++ : approved++;
     }
     project.history.push({
       action: "approve-stable-sequence-boundaries",
@@ -796,9 +986,10 @@
     );
   }
   function recoveryMetrics(project, well) {
-    const states = project.frames.map((_, i) =>
-      effective(project.records[key(i, well.uid)], well),
-    );
+    const start = analysisStart(project),
+      states = analysisIndices(project).map((i) =>
+        effective(project.records[key(i, well.uid)], well),
+      );
     const occupancy = well.occupancy || "unknown",
       origin = project.time_origin || { confirmed: true, offset_seconds: 0 },
       sequence = project.mode === "sequence",
@@ -811,6 +1002,14 @@
       awake_seconds: null,
       uncertain_seconds: null,
       first_awake_frame: null,
+      first_awake_frame_id: null,
+      first_awake_filename: null,
+      first_awake_source_frame: null,
+      analysis_start_frame: start + 1,
+      species:
+        well.occupancy === "empty"
+          ? null
+          : well.species || project.species || null,
       recovery_after_first_image_seconds: null,
       ccrt_seconds: null,
       recovery_lower_seconds: null,
@@ -841,7 +1040,8 @@
     result.awake_seconds =
       states.slice(0, -1).filter((s) => s === "awake").length * interval;
     result.uncertain_seconds =
-      states.slice(0, -1).filter((s) => s === "unknown").length * interval;
+      states.slice(0, -1).filter((s) => ["unknown", "unsure"].includes(s))
+        .length * interval;
     const first = states.indexOf("awake");
     if (first < 0) {
       result.status = states.every((s) => s === "coma")
@@ -849,10 +1049,16 @@
         : "Recovery not observed / incomplete labels";
       return result;
     }
-    result.first_awake_frame = first + 1;
+    result.first_awake_frame = first + start + 1;
+    result.first_awake_frame_id = project.frames[first + start].id || null;
+    result.first_awake_filename = project.frames[first + start].name || null;
+    result.first_awake_source_frame = frameTiming(
+      project,
+      first + start,
+    ).source_frame_number;
     result.recovery_after_first_image_seconds = first * interval;
     if (first === 0) {
-      result.status = "Already awake at first image (left-censored)";
+      result.status = "Already awake at analysis start (left-censored)";
       return result;
     }
     let lastComa = -1;
@@ -862,14 +1068,18 @@
       return result;
     }
     const delay = origin.confirmed ? origin.offset_seconds || 0 : 0;
-    result.recovery_lower_seconds = delay + lastComa * interval;
-    result.recovery_upper_seconds = delay + first * interval;
+    result.recovery_lower_seconds = origin.confirmed
+      ? delay + (start + lastComa) * interval
+      : null;
+    result.recovery_upper_seconds = origin.confirmed
+      ? delay + (start + first) * interval
+      : null;
     if (states.slice(first + 1).includes("coma")) {
       result.status = "Review: coma after an awake label";
       return result;
     }
     if (!origin.confirmed) {
-      result.status = "Confirm experimental time zero";
+      result.status = "Recovery frame known; timer offset unknown";
       return result;
     }
     if (lastComa !== first - 1) {
@@ -914,10 +1124,13 @@
           obscured: "Obscured",
           unknown: "Not checked",
         }[m.occupancy],
-        "Coma (s)": fmt(m.coma_seconds),
-        "Awake (s)": fmt(m.awake_seconds),
-        "Uncertain (s)": fmt(m.uncertain_seconds),
-        "CCRT (s)": fmt(m.ccrt_seconds),
+        Species: m.species || "",
+        "First awake frame": m.first_awake_frame ?? "",
+        "First awake image": m.first_awake_filename || "",
+        "Frame ID": m.first_awake_frame_id || "",
+        ...(project.time_origin?.confirmed !== false
+          ? { "CCRT (s)": fmt(m.ccrt_seconds) }
+          : {}),
         Status: m.status,
       }));
       if (project.mode === "single")
@@ -958,7 +1171,14 @@
             ["unknown", "obscured"].includes(m.occupancy),
           ).length,
         },
-        { Measure: "Images", Value: project.frames.length },
+        { Measure: "Loaded images", Value: project.frames.length },
+        { Measure: "Analysis start frame", Value: analysisStart(project) + 1 },
+        { Measure: "Analyzed frames", Value: analysisIndices(project).length },
+        {
+          Measure: "Species",
+          Value:
+            project.species || "Not specified; optional per-well overrides",
+        },
         {
           Measure: "Frame interval (s)",
           Value:
@@ -1011,7 +1231,7 @@
           ? [
               "One individual per well is required. Empty, multiple and unverified occupancy do not yield recovery measurements.",
               "CCRT is the first labelled awake time following a coma observation, relative to confirmed cold-exposure end. The image interval limits precision. Unknown transition gaps and later coma labels require review; a missing CCRT is not zero.",
-              "Coma/awake durations use the state at the start of each sampling interval, from the first through last image; no duration is invented after the last image.",
+              "Recovery frame identifiers refer to the loaded images and preserve the original image identity. Setup frames before the analysis start are excluded without resetting the timer. Trimmed input needs a known timer offset for CCRT seconds; otherwise only frame-based recovery is reported. Observed-window durations remain in the machine report and do not estimate unobserved coma time.",
               "Already-awake and unrecovered wells are censored, not exact CCRT measurements. Machine exports retain numeric bounds, frame-level labels and provenance.",
             ]
           : [
@@ -1048,6 +1268,10 @@
   }
 
   const api = {
+    analysisStart,
+    analysisIndices,
+    frameTiming,
+    applyRecoveryPolicy,
     imageArea,
     recoveryMetrics,
     humanReport,
