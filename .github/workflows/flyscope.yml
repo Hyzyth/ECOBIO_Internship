@@ -101,9 +101,24 @@ jobs:
           unzip -q "$RUNNER_TEMP/pose-data/dataset.zip" -d "$RUNNER_TEMP/pose-data"
       - name: Check contracts and actually train all three model families
         run: |
-          "$FLYSCOPE_SUITE_PYTHON" -m unittest tests.suite_contracts -v
-          "$FLYSCOPE_SLEAP_PYTHON" tools/sleap_pose.py train --labels "$RUNNER_TEMP/pose-data/drosophila-melanogaster-courtship/courtship_labels.slp" --output "$RUNNER_TEMP/pose-smoke" --epochs 1 --max-examples 8 --size 64 --filters 8 --batch-size 2
-          "$FLYSCOPE_SUITE_PYTHON" tools/validate_model_suite.py --pose-model "$RUNNER_TEMP/pose-smoke" --output "$RUNNER_TEMP/suite-smoke"
+          set +e
+          bash -e -c '
+            "$FLYSCOPE_SUITE_PYTHON" -m unittest tests.suite_contracts -v
+            "$FLYSCOPE_SLEAP_PYTHON" tools/sleap_pose.py train --labels "$RUNNER_TEMP/pose-data/drosophila-melanogaster-courtship/courtship_labels.slp" --output "$RUNNER_TEMP/pose-smoke" --epochs 1 --max-examples 8 --size 64 --filters 8 --batch-size 2
+            "$FLYSCOPE_SUITE_PYTHON" tools/validate_model_suite.py --pose-model "$RUNNER_TEMP/pose-smoke" --output "$RUNNER_TEMP/suite-smoke"
+          ' > "$RUNNER_TEMP/suite-training.log" 2>&1
+          suite_result=$?
+          set -e
+          cat "$RUNNER_TEMP/suite-training.log"
+          if [ "$suite_result" -ne 0 ]; then
+            python - "$RUNNER_TEMP/suite-training.log" <<'PY'
+          from pathlib import Path
+          import sys
+          for line in Path(sys.argv[1]).read_text(errors='replace').splitlines()[-40:]:
+              print('::error::' + line.replace('%', '%25').replace('\r', '%0D'))
+          PY
+          fi
+          exit "$suite_result"
       - name: Check actual checkpoint inference through the app and exports
         env:
           NODE_PATH: ${{ runner.temp }}/suite-browser/node_modules
