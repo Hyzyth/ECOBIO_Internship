@@ -5,11 +5,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from backend.services.suite_metrics import metrics
 from backend.services.suite_models import forest_export, forest_probabilities
-from tools.model_suite import TrainingData, apply_policy, checked_plan, plan_for
+from tools.model_suite import TrainingData, apply_policy, checked_plan, plan_for, main
 from tests.suite_fixtures import grids
 
 
@@ -124,6 +125,30 @@ class SuiteContracts(unittest.TestCase):
             train, _ = grids(Path(temporary) / "fixtures")
             with self.assertRaisesRegex(ValueError, "Duplicate training"):
                 TrainingData([train, train])
+
+    def test_independent_inputs_rejected_before_any_training(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            train, test = grids(root / "fixtures")
+            path = train / "annotations.json"
+            manifest = json.loads(path.read_text())
+            manifest["mode"] = "single"
+            path.write_text(json.dumps(manifest))
+            with patch("tools.model_suite.train_model") as trainer:
+                with self.assertRaisesRegex(ValueError, "ordered multi-frame"):
+                    main(
+                        [
+                            "compare",
+                            "--train",
+                            str(train),
+                            "--test",
+                            str(test),
+                            "--output",
+                            str(root / "results"),
+                        ]
+                    )
+                trainer.assert_not_called()
+                self.assertFalse((root / "results").exists())
 
 
 if __name__ == "__main__":
