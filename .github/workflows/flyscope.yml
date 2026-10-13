@@ -114,8 +114,8 @@ jobs:
             python - "$RUNNER_TEMP/suite-training.log" <<'PY'
           from pathlib import Path
           import sys
-          for line in Path(sys.argv[1]).read_text(errors='replace').splitlines()[-40:]:
-              print('::error::' + line.replace('%', '%25').replace('\r', '%0D'))
+          detail = '\n'.join(Path(sys.argv[1]).read_text(errors='replace').splitlines()[-40:])
+          print('::error::' + detail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
           PY
           fi
           exit "$suite_result"
