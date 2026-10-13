@@ -40,3 +40,23 @@ jobs:
           python -m unittest discover -s tests -v
       - name: Validate JavaScript review and dataset contracts
         run: node --test tests/*.test.js
+      - name: Install browser test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/flyscope-browser" playwright@1.63.0
+          node "$RUNNER_TEMP/flyscope-browser/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Validate guided workflow and actual study exports
+        env:
+          NODE_PATH: ${{ runner.temp }}/flyscope-browser/node_modules
+          PYTHON: python
+        run: |
+          export CHROMIUM_PATH="$(node -p 'require("playwright").chromium.executablePath()')"
+          python app.py > "$RUNNER_TEMP/flyscope-server.log" 2>&1 &
+          flyscope_pid=$!
+          trap 'kill "$flyscope_pid"' EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models
+          node tests/workflow-browser.cjs
+          node tests/studies-browser.cjs

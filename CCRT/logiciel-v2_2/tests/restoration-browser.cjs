@@ -1,3 +1,4 @@
+const { step, openOptions } = require("./workflow-helpers.cjs");
 const { chromium } = require("playwright"),
   assert = require("node:assert/strict"),
   fs = require("node:fs"),
@@ -31,6 +32,7 @@ for i in range(3): Image.new('RGB',(600,400),(40+i*30,90,140)).save(p/f'frame{i}
     .locator("#files")
     .setInputFiles([0, 1, 2].map((i) => path.join(out, `frame${i}.png`)));
   await page.waitForFunction(() => image !== null);
+  await step(page, "wells");
   await page.locator("#whole").click();
   assert.equal(
     await page.locator("#boundaryApproval").inputValue(),
@@ -41,6 +43,8 @@ for i in range(3): Image.new('RGB',(600,400),(40+i*30,90,140)).save(p/f'frame{i}
     await page.evaluate(() => project.wells[0].review_frames.length),
     0,
   );
+  await step(page, "review");
+  await openOptions(page, "rangeOptions");
   await page.locator("#rangeStart").fill("1");
   await page.locator("#rangeEnd").fill("2");
   await page.locator("#applyRange").click();
@@ -92,11 +96,13 @@ with zipfile.ZipFile(p/'old-report.zip','w',compression=zipfile.ZIP_DEFLATED) as
     3,
   );
   assert.equal(await page.evaluate(() => C.summary(project)[0].coma_frames), 0);
+  await step(page, "export");
   const promise = page.waitForEvent("download");
   await page.locator("#report").click();
   const d = await promise;
   await d.saveAs(path.join(out, "new-report.zip"));
   await page.waitForFunction(() => !busy);
+  await step(page, "review");
   await page.locator("#occupancy").selectOption("single");
   await page.locator("#labelAwake").click();
   await page
@@ -135,6 +141,7 @@ with zipfile.ZipFile(p/'old-report.zip','w',compression=zipfile.ZIP_DEFLATED) as
     "coma",
     "awake",
   ]);
+  await step(page, "wells");
   await page.locator("#confirmSequence").click();
   assert.equal(
     await page.evaluate(() => project.wells[0].review_frames.length),

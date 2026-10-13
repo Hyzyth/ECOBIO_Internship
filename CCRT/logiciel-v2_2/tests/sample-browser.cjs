@@ -1,3 +1,4 @@
+const { step, openOptions } = require("./workflow-helpers.cjs");
 /* Run against a started Flask app with SAMPLE_DIR pointing to the extracted
    user samples. Images stay outside the repository; this does not train a model. */
 const { chromium } = require("playwright");
@@ -33,6 +34,8 @@ const fs = require("node:fs"),
   );
   await page.locator("#files").setInputFiles(files);
   await page.waitForFunction(() => image !== null);
+  await step(page, "wells");
+  await openOptions(page, "detectionOptions");
   await page.locator("#detect").click();
   await page.waitForFunction(
     () => !busy && document.querySelector("#wellSelect").options.length === 79,
@@ -58,6 +61,7 @@ const fs = require("node:fs"),
   const referenceIds = await page
     .locator("#proposalSelect option")
     .evaluateAll((options) => options.slice(1).map((o) => o.value));
+  await openOptions(page, "alignmentOptions");
   await page.locator("#alignSequence").click();
   await page.waitForFunction(
     () =>
@@ -86,6 +90,7 @@ const fs = require("node:fs"),
     );
     await page.locator("#confirmFrame").click();
   }
+  await step(page, "export");
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#json").click();
   const download = await downloadPromise;
@@ -124,6 +129,7 @@ const fs = require("node:fs"),
   );
   assert.equal(await page.locator("#proposalSelect option").count(), 79);
   let alignmentCalls = 0;
+  await step(page, "wells");
   await page.route("**/api/align", async (route) => {
     alignmentCalls++;
     if (alignmentCalls === 2)
@@ -168,15 +174,21 @@ const fs = require("node:fs"),
     referenceIds,
   );
   await page.unroute("**/api/align");
+  await step(page, "images");
   await page.locator("#mode").selectOption("single");
-  await page.locator("#layout").selectOption("individual");
   for (const [folder, file] of ["coma", "awake"].flatMap((folder) =>
     fs
       .readdirSync(path.join(root, folder))
       .filter((file) => file.endsWith(".png"))
       .map((file) => [folder, file]),
   )) {
+    await step(page, "images");
     await page.locator("#files").setInputFiles(path.join(root, folder, file));
+    await page.waitForFunction(() => image !== null && !busy);
+    await step(page, "wells");
+    await page.locator("#layout").selectOption("individual");
+    if (await page.evaluate(() => !project.wells.length))
+      await page.locator("#detect").click();
     await page.waitForFunction(
       () =>
         image !== null &&
@@ -198,15 +210,17 @@ const fs = require("node:fs"),
     );
     await page.screenshot({ path: path.join(output, `${folder}-${file}.png`) });
     assert.match(await page.locator("#prediction").textContent(), /UNKNOWN/);
+    await step(page, "review");
+    await openOptions(page, "annotationOptions");
     await page.locator("#correction").selectOption(folder);
     await page.locator("#saveCorrection").click();
     assert.match(
       await page.locator("#prediction").textContent(),
       new RegExp(folder.toUpperCase()),
     );
-    assert.match(
+    assert.doesNotMatch(
       await page.locator("#prediction").textContent(),
-      /Confidence: Not available/,
+      /Model confidence:/,
     );
   }
   assert.deepEqual(errors, []);

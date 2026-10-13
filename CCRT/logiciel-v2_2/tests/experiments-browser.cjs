@@ -1,3 +1,4 @@
+const { step, openOptions } = require("./workflow-helpers.cjs");
 const { chromium } = require("playwright"),
   assert = require("node:assert/strict"),
   fs = require("node:fs"),
@@ -38,6 +39,8 @@ for group in ['train','test']:
     () => document.querySelector("#model").options.length >= 3,
   );
   async function download(id, name) {
+    await step(page, "export");
+    await openOptions(page, "trainingOptions");
     const promise = page.waitForEvent("download");
     await page.locator("#" + id).click();
     const d = await promise;
@@ -45,14 +48,14 @@ for group in ['train','test']:
     await page.waitForFunction(() => !busy);
   }
   async function setup(group) {
+    await step(page, "images");
     await page
       .locator("#files")
       .setInputFiles(
         [0, 1, 2].map((f) => path.join(out, group, `frame${f}.png`)),
       );
     await page.waitForFunction(() => image !== null);
-    await page.locator("#experiment").fill("synthetic-" + group);
-    await page.locator("#experiment").press("Tab");
+    await step(page, "wells");
     await page.evaluate(() => {
       for (let row = 0; row < 2; row++)
         for (let col = 0; col < 3; col++) {
@@ -67,6 +70,8 @@ for group in ['train','test']:
         }
     });
     await page.locator("#confirmSequence").click();
+    await step(page, "review");
+    await openOptions(page, "rangeOptions");
     for (const [n, label] of [
       [0, "coma"],
       [1, "awake"],
@@ -80,11 +85,19 @@ for group in ['train','test']:
     }
     await page.locator("#wellSelect").selectOption({ index: 3 });
     await page.locator("#occupancy").selectOption("empty");
+    await step(page, "export");
+    await openOptions(page, "trainingOptions");
+    await page.locator("#experiment").fill("synthetic-" + group);
+    await page.locator("#experiment").press("Tab");
   }
   await setup("train");
+  await openOptions(page, "comparisonOptions");
   await page.locator("#comparisonSeed").fill("77");
   await page.locator("#poorWell").fill("W1");
   await page.locator("#richWell").fill("W2");
+  await step(page, "review");
+  await openOptions(page, "modelOptions");
+  assert.equal(await page.locator("#predictionDetails").isVisible(), false);
   await page.locator("#model").selectOption("legacy-model1");
   await page.locator("#analyze").click();
   await page.waitForFunction(
@@ -93,6 +106,13 @@ for group in ['train','test']:
       Object.values(project.records).filter((r) => r.prediction).length === 18,
     {},
     { timeout: 90000 },
+  );
+  assert.equal(await page.locator("#predictionDetails").isVisible(), true);
+  assert.equal(await page.locator("#predictionInfo").isVisible(), false);
+  await openOptions(page, "predictionDetails");
+  assert.match(
+    await page.locator("#predictionInfo").textContent(),
+    /Version:.*Model state:/,
   );
   assert.equal(
     await page.evaluate(
@@ -111,6 +131,7 @@ for group in ['train','test']:
     9,
   );
   await download("training", "train.zip");
+  await step(page, "wells");
   await page.locator("#layout").selectOption("individual");
   assert.equal(await page.locator("#layout").inputValue(), "grid");
   await setup("test");
@@ -118,12 +139,14 @@ for group in ['train','test']:
   assert.equal(await page.locator("#comparisonOptions").isVisible(), false);
   await download("training", "test.zip");
   // Single-well mode keeps a stable identity when replacing the boundary.
+  await step(page, "images");
   await page.locator("#mode").selectOption("single");
-  await page.locator("#layout").selectOption("individual");
   await page
     .locator("#files")
     .setInputFiles(path.join(out, "test", "frame0.png"));
   await page.waitForFunction(() => !busy && image !== null);
+  await step(page, "wells");
+  await page.locator("#layout").selectOption("individual");
   await page.locator("#whole").click();
   assert.equal(await page.evaluate(() => project.wells.length), 1);
   const uid = await page.evaluate(() => project.wells[0].uid);

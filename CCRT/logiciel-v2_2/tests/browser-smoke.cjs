@@ -1,3 +1,4 @@
+const { step, openOptions } = require("./workflow-helpers.cjs");
 const { chromium } = require("playwright");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"),
@@ -41,11 +42,14 @@ for i in [1,2,10]:
   await page.waitForFunction(
     () => document.querySelector("#frameName").textContent === "frame1.png",
   );
+  await step(page, "wells");
   await page.locator("#detect").click();
   await page.waitForFunction(
     () => document.querySelector("#wellSelect").options.length === 3,
   );
   await page.locator("#confirm").click();
+  await step(page, "review");
+  await openOptions(page, "annotationOptions");
   await page.locator("#correction").selectOption("coma");
   assert.equal(await page.locator("#eggCount").isVisible(), false);
   await page.locator("#notes").fill("Observed manually");
@@ -57,6 +61,7 @@ for i in [1,2,10]:
   );
   await page.locator("#correction").selectOption("awake");
   await page.locator("#saveCorrection").click();
+  await step(page, "export");
   const downloadPromise = page.waitForEvent("download");
   await page.locator("#json").click();
   const download = await downloadPromise;
@@ -69,6 +74,7 @@ for i in [1,2,10]:
   );
   assert.equal(p.results[1].prediction, "unknown");
   assert.equal(p.results[1].user_correction.egg_count, null);
+  await step(page, "wells");
   await page.locator("#wellName").fill("A3");
   await page.locator("#wellName").press("Tab");
   await page.locator("#tool").selectOption("vertex");
@@ -112,8 +118,8 @@ for i in [1,2,10]:
     ),
     true,
   );
+  await step(page, "images");
   await page.locator("#mode").selectOption("single");
-  await page.locator("#layout").selectOption("individual");
   await page
     .locator("#files")
     .setInputFiles(path.join(work, "fixtures/frame2.png"));
@@ -122,11 +128,16 @@ for i in [1,2,10]:
   );
   assert.equal(await page.locator("#play").isDisabled(), true);
   await page.waitForFunction(() => !busy);
+  await step(page, "wells");
+  await page.locator("#layout").selectOption("individual");
   await page.locator("#whole").click();
   assert.equal(await page.locator("#wellSelect option").count(), 2);
+  await step(page, "review");
+  await openOptions(page, "annotationOptions");
   await page.locator("#correction").selectOption("awake");
   await page.locator("#saveCorrection").click();
   assert.match(await page.locator("#prediction").textContent(), /AWAKE/);
+  await step(page, "wells");
   await page.locator("#tool").selectOption("polygon");
   await page.locator("#canvas").scrollIntoViewIfNeeded();
   await page.waitForFunction(() => image !== null);
@@ -165,6 +176,8 @@ for i in [1,2,10]:
   await page.keyboard.press("Delete");
   assert.equal(await page.locator("#proposalSelect option").count(), 1);
   assert.equal(await page.locator("#summary tr").count(), 0);
+  assert.equal(await page.locator("#stepReview").isDisabled(), true);
+  assert.equal(await page.locator("#stepExport").isDisabled(), true);
   assert.deepEqual(errors, []);
   await browser.close();
   console.log("Browser artifacts:", work);
