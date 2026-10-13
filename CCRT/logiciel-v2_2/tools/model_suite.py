@@ -773,6 +773,13 @@ def main(argv=None):
         ):
             raise ValueError("Invalid training parameters.")
         data = TrainingData(args.train)
+        if "deepethogram" in args.architectures and any(
+            d.manifest.get("mode") != "sequence" or len(d.manifest["images"]) < 2
+            for d in data.datasets
+        ):
+            raise ValueError(
+                "DeepEthogram requires ordered multi-frame training sequences; select resnet18/sleap-rf for independent images."
+            )
         for train in data.datasets:
             check_holdouts(train, tests)
         plan = checked_plan(data, args.plan, args.seed, args.poor_well, args.rich_well)

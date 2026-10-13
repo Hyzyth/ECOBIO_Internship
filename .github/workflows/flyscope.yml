@@ -80,6 +80,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      - name: Install native Qt libraries required by headless SLEAP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libglib2.0-0
       - name: Install isolated app, suite and pose runtimes
         run: |
           python -c 'import sys; assert sys.version_info[:3] == (3, 10, 7), sys.version'

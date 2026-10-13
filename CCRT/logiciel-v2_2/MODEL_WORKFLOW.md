@@ -36,6 +36,8 @@ For independently collected evaluation grids, check **Export as test set**. This
 
 The base app and original Keras weights use `.venv`. The new suite uses `.venv-suite`; native SLEAP uses `.venv-sleap`. SLEAP 1.4.1 is pinned because newer SLEAP requires Python 3.11. Its TensorFlow 2.9 dependencies conflict with the app's current TensorFlow; isolate them rather than changing the deployment interpreter.
 
+On Debian/Ubuntu, install the native Qt import dependencies with `sudo apt-get install libegl1 libgl1 libxkbcommon0 libglib2.0-0`. SLEAP imports Qt widgets even for headless label loading; `QT_QPA_PLATFORM=offscreen` does not replace these shared libraries. They are already available in the prepared cloud machine.
+
 ```sh
 python3.10 -c 'import sys; assert sys.version_info[:3] == (3,10,7), sys.version'
 python3.10 -m venv .venv-suite
