@@ -25,9 +25,9 @@ jobs:
         working-directory: CCRT/logiciel-v2_2
     env:
       KERAS_BACKEND: torch
-      MPLCONFIGDIR: ${{ runner.temp }}/flyscope-mpl
-      FLYSCOPE_CACHE_DIR: ${{ runner.temp }}/flyscope-model-code
-      TORCH_HOME: ${{ runner.temp }}/flyscope-torch
+      MPLCONFIGDIR: /tmp/flyscope-mpl
+      FLYSCOPE_CACHE_DIR: /tmp/flyscope-model-code
+      TORCH_HOME: /tmp/flyscope-torch
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
