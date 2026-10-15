@@ -52,7 +52,8 @@ def check(require_cuda=False, prepare_models=False):
     x = torch.randn(2, 3, 32, 32, device=device, requires_grad=True)
     grid = torch.rand(2, 32, 32, 2, device=device) * 2 - 1
     out = torch.nn.functional.grid_sample(conv(x), grid, align_corners=False)
-    out.square().mean().backward()
+    classifier = torch.nn.Linear(8, 3).to(device)
+    classifier(out.mean(dim=(2, 3))).square().mean().backward()
     if not torch.isfinite(x.grad).all():
         raise RuntimeError("Runtime forward/backward produced invalid gradients.")
     pose = network({"filters": 8, "size": 32, "nodes": ["head", "tail"]}).to(device)

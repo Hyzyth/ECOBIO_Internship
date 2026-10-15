@@ -138,7 +138,7 @@ python tools/sleap_pose.py train --labels /path/to/overhead-labels.slp \
   --epochs 25 --batch-size 4 --device cuda
 ```
 
-Parent hash and skeleton must match. Use the same pose parent across CCRT selections. Model B trains state and occupancy forests separately per selected CCRT subset; the external pose parent stays fixed, preserving the CCRT annotation budgets.
+Parent hash and skeleton must match. If you trained `pose-overhead`, use that directory instead of `pose-base` in the comparison commands below. Use the same pose parent across CCRT selections. Model B trains state and occupancy forests separately per selected CCRT subset; the external pose parent stays fixed, preserving the CCRT annotation budgets.
 
 ## 6. Create the shared training plan
 
