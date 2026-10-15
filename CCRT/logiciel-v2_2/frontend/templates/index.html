@@ -59,12 +59,19 @@
           <div data-loaded hidden>
             <details data-multiple><summary>Check image order</summary><ol id="frameList"></ol></details>
             <label data-sequence>Frame interval (seconds)<input id="interval" type="number" min="0.001" step="0.1" value="1" /></label>
+            <label data-sequence>Input sequence<select id="inputKind"><option value="raw">Raw sequence (includes setup frames)</option><option value="trimmed">Already trimmed / pre-filtered</option></select></label>
+            <label data-sequence>First frame to analyze<input id="analysisStart" type="number" min="1" step="1" value="1" /></label>
+            <button id="startHere" class="secondary" data-sequence>Start analysis at the displayed frame</button>
+            <p id="analysisWindowInfo" class="hint" data-sequence></p>
             <p class="hint" data-sequence>Use the interval between recorded images, not the playback speed. Frame 1 is time zero by default.</p>
             <details id="timingOptions" data-sequence>
               <summary>Change the time reference</summary>
-              <label><input id="timeConfirmed" type="checkbox" checked /> Timing referenced to cold-exposure end</label>
+              <label><input id="timeConfirmed" type="checkbox" checked /> Recovery time reference and offset are known</label>
               <label>Delay from cold-exposure end to frame 1 (seconds)<input id="recoveryDelay" type="number" min="0" step="0.1" value="0" /></label>
+              <label>Original frame number of the first loaded image (optional)<input id="sourceFirstFrame" type="number" min="1" step="1" value="1" /></label>
+              <p class="hint">Setup frames still count toward the original timer. For trimmed input, enter the known time from cold-exposure end to the first loaded image. Leave the time reference unchecked if that offset is unknown; the report will use frame IDs.</p>
             </details>
+            <details data-ccrt><summary>Species metadata (optional)</summary><label>Species for this grid<input id="gridSpecies" placeholder="e.g. D. melanogaster" maxlength="200" /></label><p class="hint">Use a per-well override during review if a later grid mixes species.</p></details>
             <label data-eggs>Count in<select id="eggScope"><option value="image">Whole images</option><option value="areas">Custom areas</option></select></label>
             <button id="inputContinue" class="workflow-next" data-next-step>Continue to wells →</button>
             <details id="restoreOptions">
@@ -113,8 +120,8 @@
           <details id="alignmentOptions" data-sequence data-wells>
             <summary>Correct camera movement</summary>
             <p class="hint">Use if the grid shifts. Review the proposed boundaries afterwards.</p>
-            <button id="alignSequence" class="secondary">Align entire sequence to first</button>
-            <button id="align" class="secondary">Align current frame to first</button>
+            <button id="alignSequence" class="secondary">Align analysis frames to start frame</button>
+            <button id="align" class="secondary">Align current frame to start frame</button>
           </details>
           <label data-wells><input id="mask" type="checkbox" checked /> Dim outside wells</label>
           <button id="wellsContinue" class="workflow-next" data-next-step disabled>Continue to review →</button>
@@ -127,6 +134,9 @@
             <summary>Optional model predictions</summary>
             <label>Model<select id="model"></select></label>
             <p id="modelInfo" class="hint"></p>
+            <label data-ccrt>Minimum decision confidence<input id="decisionThreshold" type="number" min="0.5" max="1" step="0.05" value="0.8" /></label>
+            <label data-sequence>Consecutive awake frames to confirm recovery<input id="awakeFrames" type="number" min="1" max="100" step="1" value="3" /></label>
+            <p class="hint" data-ccrt>Weak evidence is Unsure. In a sequence, confirmed Awake decisions remain Awake to the end; raw outputs stay in the machine report. Set these before evaluation, using training/validation data.</p>
             <button id="analyze">Analyze sequence</button>
           </details>
           <button id="reviewContinue" class="workflow-next" data-next-step>Continue to export →</button>
@@ -147,7 +157,7 @@
               <label>Shared seed<input id="comparisonSeed" type="number" min="0" max="4294967295" step="1" value="2026" /></label>
               <label>Poor-pose well ID (optional)<input id="poorWell" placeholder="e.g. W3" /></label>
               <label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label>
-              <p class="hint">Every model uses the same saved selections: all annotated wells; 2 × 50, 5 × 25, 10 × 10, 20 × 5 and 30 × 2 random wells. Oversized budgets are skipped.</p>
+              <p class="hint">Every model uses the same saved selections: one full annotated grid (including Empty); 2 × 25, 5 × 10, 10 × 5 and 20 × 2 single-individual wells; one poor-pose and one rich-pose well. Oversized budgets are skipped. Unannotated wells are never negative targets.</p>
             </details>
             <p id="datasetHint" class="hint"></p>
             <button id="training" class="secondary">Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP</button>
@@ -176,7 +186,7 @@
             <h2>Image workspace</h2>
             <span data-ccrt data-workflow-stages="review export" class="legend"
               ><i class="coma"></i> Coma <i class="awake"></i> Awake
-              <i class="unknown"></i> Uncertain / unlabeled <i class="empty"></i> Empty (E) <span style="color:#dc70ff">! Multiple individuals</span></span
+              <i class="unknown"></i> Uncertain / unlabeled <i class="unsure"></i> Model unsure (U) <i class="empty"></i> Empty (E) <span style="color:#dc70ff">! Multiple individuals</span></span
             >
           </div>
           <div class="proposal-tools" data-geometry data-workflow-stages="wells" data-wells>
@@ -267,6 +277,7 @@
             <p id="predictionInfo" class="hint"></p>
           </details>
           {% if study == 'ccrt' %}<details id="annotationOptions" data-workflow-stages="review"><summary>Notes and detailed annotation</summary>{% endif %}
+          <label data-ccrt>Species override for this well (optional)<input id="wellSpecies" placeholder="Use grid species" maxlength="200" /></label>
           <div class="editor" data-workflow-stages="review">
             <label data-ccrt
               >Manual state<select id="correction">

@@ -5,6 +5,7 @@ const C = ReviewCore,
     coma: "#ff304f",
     awake: "#00ec57",
     unknown: "#9cacc1",
+    unsure: "#ffd34d",
     empty: "#00cfff",
     invalid: "#dc70ff",
   },
@@ -39,7 +40,10 @@ let project = {
 const canvas = $("canvas"),
   ctx = canvas.getContext("2d");
 const status = (message) => ($("status").textContent = message);
-const visibleWells = () => project.wells.filter((w) => C.activeWell(w, index));
+const visibleWells = () =>
+  index < C.analysisStart(project)
+    ? []
+    : project.wells.filter((w) => C.activeWell(w, index));
 const selectedWell = () => visibleWells().find((w) => w.uid === selected);
 const record = () => project.records[C.key(index, selected)] || {};
 function history(action, details) {
@@ -68,6 +72,8 @@ function goToStep(step) {
   endDrag();
   draft = [];
   workflowStage = step;
+  if (step !== "images" && index < C.analysisStart(project))
+    moveTo(C.analysisStart(project));
   // Selecting a well during review must not accidentally move its boundary.
   if (step !== "wells") $("tool").value = "select";
   updateContext();
@@ -142,7 +148,11 @@ function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!image) return;
   ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-  if ($("mask").checked && project.wells.length) {
+  if (
+    $("mask").checked &&
+    visibleWells().length &&
+    workflowStage !== "images"
+  ) {
     const layer = document.createElement("canvas");
     layer.width = canvas.width;
     layer.height = canvas.height;
@@ -172,7 +182,7 @@ function draw() {
     ctx.setLineDash(
       state === "empty"
         ? [3, 4]
-        : state === "unknown"
+        : ["unknown", "unsure"].includes(state)
           ? [10, 6]
           : w.detection.review_required || w.review_frames?.includes(index)
             ? [8, 5]
@@ -198,7 +208,9 @@ function draw() {
                   ? "E"
                   : state === "invalid"
                     ? "!"
-                    : "?")
+                    : state === "unsure"
+                      ? "U"
+                      : "?")
           : ""),
       x + 7,
       y - 6,
@@ -256,9 +268,7 @@ async function renderFrame() {
   const alignmentFailure = project.alignment_failures?.[index];
   $("frameName").textContent =
     (files[index]?.name || "") +
-    (alignment
-      ? ` · ${alignment.method} alignment · ${(alignment.inlier_ratio * 100).toFixed(1)}% matched-feature inliers · ${alignment.median_error_px.toFixed(2)} px median feature error (resized image)`
-      : "");
+    (alignment ? ` · Camera alignment applied` : "");
   if (!selectedWell()) selected = visibleWells()[0]?.uid || null;
   updateContext();
   const sequence = project.mode === "sequence";
@@ -304,7 +314,7 @@ async function previews() {
       const f = current + j - 1;
       if (
         !w ||
-        f < 0 ||
+        f < C.analysisStart(project) ||
         f >= files.length ||
         (project.mode !== "sequence" && j !== 1)
       ) {
@@ -408,9 +418,19 @@ function updateDetails() {
   $("eggCount").value = r.correction?.egg_count ?? "";
   $("notes").value = r.correction?.notes || "";
   $("wellProgress").textContent = w
-    ? `${w.id}: ${project.frames.filter((_, i) => !C.boundaryNeedsReview(w, i)).length} / ${project.frames.length} boundaries reviewed; ${project.frames.filter((_, i) => project.records[C.key(i, w.uid)]?.correction?.state).length} / ${project.frames.length} frames manually labeled.`
+    ? `${w.id}: ${C.analysisIndices(project).filter((i) => !C.boundaryNeedsReview(w, i)).length} / ${C.analysisIndices(project).length} boundaries reviewed; ${C.analysisIndices(project).filter((i) => project.records[C.key(i, w.uid)]?.correction?.state).length} / ${C.analysisIndices(project).length} frames manually labeled.`
     : "Select a well to review and label its sequence.";
   $("undoLabels").disabled = busy || !lastLabelOperation;
+  $("wellSpecies").value = w?.species || "";
+  $("rangeStart").min = $("rangeEnd").min = C.analysisStart(project) + 1;
+  $("rangeStart").value = Math.max(
+    Number($("rangeStart").value),
+    C.analysisStart(project) + 1,
+  );
+  $("rangeEnd").value = Math.max(
+    Number($("rangeEnd").value),
+    C.analysisStart(project) + 1,
+  );
   $("rangeStart").max = $("rangeEnd").max = project.frames.length || 1;
   const state =
     study === "ccrt" ? C.effective(r, w).toUpperCase() : "EGG COUNT";
@@ -418,7 +438,7 @@ function updateDetails() {
     ? `${w.id} · ${state}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${r.correction ? " · Manual annotation applied" : ""}${r.confidence == null ? "" : " · Model confidence: " + Math.round(r.confidence * 100) + "%"}${C.boundaryNeedsReview(w, index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
   $("predictionInfo").textContent = r.model
-    ? `${r.model.name} · Version: ${r.model.version} · Model state: ${(r.prediction || "unknown").toUpperCase()} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}`
+    ? `${r.model.name} · Version: ${r.model.version} · Model state: ${(r.prediction || "unknown").toUpperCase()} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.raw_prediction ? " · Raw state: " + r.raw_prediction.toUpperCase() + " · Raw confidence: " + (r.raw_confidence == null ? "Not available" : Math.round(r.raw_confidence * 100) + "%") : ""}${r.recovery_decision?.confirmed_frame_index != null ? " · Recovery starts at frame " + (r.recovery_decision.onset_frame_index + 1) + ", confirmed at frame " + (r.recovery_decision.confirmed_frame_index + 1) : ""}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}`
     : "";
   renderSummary();
   updateContext();
@@ -454,7 +474,7 @@ function renderSummary() {
       const td = document.createElement("td"),
         spark = document.createElement("div");
       spark.className = "spark";
-      project.frames.forEach((_, i) => {
+      C.analysisIndices(project).forEach((i) => {
         const state = C.effective(
             project.records[C.key(i, project.wells[rowIndex].uid)],
             project.wells[rowIndex],
@@ -577,6 +597,16 @@ async function loadFiles(input) {
       confirmed: $("timeConfirmed").checked,
       offset_seconds: Math.max(0, Number($("recoveryDelay").value) || 0),
     },
+    analysis_start_index: 0,
+    input_kind: $("inputKind").value,
+    source_first_frame_number: $("sourceFirstFrame").value
+      ? Number($("sourceFirstFrame").value)
+      : null,
+    species: $("gridSpecies").value.trim(),
+    recovery_policy: {
+      confidence_threshold: Number($("decisionThreshold").value),
+      awake_consecutive_frames: Number($("awakeFrames").value),
+    },
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
@@ -589,6 +619,7 @@ async function loadFiles(input) {
     history: [],
   };
   index = 0;
+  $("analysisStart").value = 1;
   selected = null;
   $("frameList").replaceChildren(
     ...project.frames.map((f, i) => {
@@ -616,7 +647,10 @@ async function loadFiles(input) {
 }
 function moveTo(i) {
   if (busy || !files.length) return;
-  index = Math.max(0, Math.min(files.length - 1, i));
+  index = Math.max(
+    workflowStage === "images" ? 0 : C.analysisStart(project),
+    Math.min(files.length - 1, i),
+  );
   draft = [];
   renderFrame();
 }
@@ -665,6 +699,14 @@ function setBusy(value) {
     "saveDraft",
     "drawWell",
     "setRegion",
+    "inputKind",
+    "analysisStart",
+    "sourceFirstFrame",
+    "startHere",
+    "gridSpecies",
+    "wellSpecies",
+    "decisionThreshold",
+    "awakeFrames",
   ].forEach((id) => ($(id).disabled = value));
   $("cancel").hidden = !value;
   $("progress").hidden = !value;
@@ -739,7 +781,16 @@ async function detect() {
   }
 }
 function invalidate(uid, frame) {
-  const frames = frame == null ? project.frames.map((_, i) => i) : [frame];
+  const temporal =
+    frame != null &&
+    project.mode === "sequence" &&
+    project.records[C.key(frame, uid)]?.model?.requires_sequence;
+  const frames =
+    frame == null || temporal
+      ? project.frames
+          .map((_, i) => i)
+          .filter((i) => frame == null || i >= frame)
+      : [frame];
   for (const f of frames) {
     const k = C.key(f, uid),
       r = project.records[k];
@@ -748,6 +799,7 @@ function invalidate(uid, frame) {
       project.records[k] = r.correction ? { correction: r.correction } : {};
     }
   }
+  if (study === "ccrt") C.applyRecoveryPolicy(project);
 }
 function saveGeometry(w, points) {
   if (study === "eggs") w.area_type = "region";
@@ -997,6 +1049,16 @@ $("mode").onchange = () => {
       confirmed: $("timeConfirmed").checked,
       offset_seconds: Math.max(0, Number($("recoveryDelay").value) || 0),
     },
+    analysis_start_index: 0,
+    input_kind: $("inputKind").value,
+    source_first_frame_number: $("sourceFirstFrame").value
+      ? Number($("sourceFirstFrame").value)
+      : null,
+    species: $("gridSpecies").value.trim(),
+    recovery_policy: {
+      confidence_threshold: Number($("decisionThreshold").value),
+      awake_consecutive_frames: Number($("awakeFrames").value),
+    },
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
@@ -1024,6 +1086,17 @@ $("order").onchange = () => {
 $("interval").onchange = () => {
   const v = Number($("interval").value);
   if (!Number.isFinite(v) || v <= 0) {
+    $("inputKind").value = project.input_kind || "raw";
+    $("analysisStart").value = C.analysisStart(project) + 1;
+    $("sourceFirstFrame").value =
+      project.source_first_frame_number === null
+        ? ""
+        : project.source_first_frame_number || 1;
+    $("gridSpecies").value = project.species || "";
+    $("decisionThreshold").value =
+      project.recovery_policy?.confidence_threshold ?? 0.8;
+    $("awakeFrames").value =
+      project.recovery_policy?.awake_consecutive_frames ?? 3;
     $("interval").value = project.interval;
     return;
   }
@@ -1200,8 +1273,8 @@ $("analyze").onclick = async () => {
   if (!files.length || !project.wells.length)
     return status("Load images and select wells first.");
   if (
-    project.wells.some(
-      (w) => w.detection.review_required || w.review_frames?.length,
+    project.wells.some((w) =>
+      C.analysisIndices(project).some((i) => C.boundaryNeedsReview(w, i)),
     )
   )
     return status(
@@ -1212,12 +1285,17 @@ $("analyze").onclick = async () => {
   setBusy(true);
   $("progress").max = files.length;
   $("progress").value = 0;
+  const sequenceSession = crypto.randomUUID();
   try {
-    for (let i = 0; i < files.length; i++) {
+    for (const i of C.analysisIndices(project)) {
       if (cancelled) break;
       const form = new FormData();
       form.append("image", files[i]);
       form.append("model", $("model").value);
+      if (project.mode === "sequence") {
+        form.append("sequence_session", sequenceSession);
+        form.append("frame_index", String(i));
+      }
       form.append(
         "wells",
         JSON.stringify(
@@ -1244,6 +1322,10 @@ $("analyze").onclick = async () => {
         project.records[k] = {
           ...project.records[k],
           prediction: r.prediction,
+          raw_prediction: r.raw_prediction ?? r.prediction,
+          analysis_session: sequenceSession,
+          raw_confidence: r.raw_confidence ?? r.confidence,
+          recovery_decision: null,
           state_probabilities: r.state_probabilities || null,
           occupancy_prediction: r.occupancy_prediction || null,
           occupancy_score: r.occupancy_score ?? null,
@@ -1253,6 +1335,7 @@ $("analyze").onclick = async () => {
           egg_count: r.egg_count ?? null,
         };
       });
+      if (study === "ccrt") C.applyRecoveryPolicy(project);
       $("progress").value = i + 1;
     }
     status(
@@ -1389,7 +1472,7 @@ window.addEventListener("beforeunload", (e) => {
       ...models.map(
         (m) =>
           new Option(
-            `${m.id === "manual" ? "Manual " + (study === "eggs" ? "egg counting" : "CCRT review") : m.name} · ${m.version.slice(0, 12)}${m.available === false ? " (install model dependencies)" : ""}`,
+            `${m.id === "manual" ? "Manual " + (study === "eggs" ? "egg counting" : "CCRT review") : m.name} · ${m.version.slice(0, 12)}${m.available === false ? (m.untrained ? " (train first)" : " (runtime unavailable)") : ""}`,
             m.id,
           ),
       ),
@@ -1400,6 +1483,11 @@ window.addEventListener("beforeunload", (e) => {
     });
     $("model").onchange = () => {
       const m = models.find((m) => m.id === $("model").value);
+      if (m?.recovery_policy) {
+        project.recovery_policy = structuredClone(m.recovery_policy);
+        $("decisionThreshold").value = m.recovery_policy.confidence_threshold;
+        $("awakeFrames").value = m.recovery_policy.awake_consecutive_frames;
+      }
       $("modelInfo").textContent =
         m?.id === "manual"
           ? study === "eggs"
@@ -1423,15 +1511,16 @@ async function alignFrames(entireSequence) {
     project.mode !== "sequence" ||
     !project.wells.length ||
     files.length < 2 ||
-    (!entireSequence && index === 0)
+    (!entireSequence && index === C.analysisStart(project))
   )
     return status(
       "Define wells on the first frame, then select a later sequence frame or align the entire sequence.",
     );
-  const targets = entireSequence ? files.map((_, i) => i).slice(1) : [index];
+  const reference = C.analysisStart(project),
+    targets = entireSequence ? C.analysisIndices(project).slice(1) : [index];
   const baseWells = project.wells.map((w) => ({
     id: w.uid,
-    points: C.geometry(w, 0),
+    points: C.geometry(w, reference),
   }));
   stop();
   cancelled = false;
@@ -1445,7 +1534,7 @@ async function alignFrames(entireSequence) {
       if (cancelled) break;
       try {
         const form = new FormData();
-        form.append("reference", files[0]);
+        form.append("reference", files[reference]);
         form.append("image", files[frame]);
         form.append("wells", JSON.stringify(baseWells));
         const data = await post("/api/align", form);
@@ -1463,7 +1552,7 @@ async function alignFrames(entireSequence) {
           inlier_ratio: data.inlier_ratio,
           median_error_px: data.median_error_px,
           p95_error_px: data.p95_error_px,
-          reference_frame: 0,
+          reference_frame: reference,
           working_image_size: data.working_image_size,
         };
         project.alignments ??= {};
@@ -1476,7 +1565,7 @@ async function alignFrames(entireSequence) {
         project.alignment_failures ??= {};
         project.alignment_failures[frame] = {
           error: error.message,
-          reference_frame: 0,
+          reference_frame: reference,
         };
         delete project.alignments?.[frame];
         project.wells.forEach((w) => {
@@ -1582,7 +1671,11 @@ function updateContext() {
         ? "Analyze sequence"
         : "Analyze image";
   if (study === "eggs") $("scope").value = "frame";
-  $("align").disabled = busy || !sequence || index === 0 || files.length < 2;
+  $("align").disabled =
+    busy ||
+    !sequence ||
+    index === C.analysisStart(project) ||
+    C.analysisIndices(project).length < 2;
   $("alignSequence").disabled = busy || !sequence || files.length < 2;
   $("analyze").disabled = busy || $("model").value === "manual";
   $("order").disabled = busy;
@@ -1594,18 +1687,30 @@ function updateContext() {
     !sequence ||
     workflowStage !== "wells" ||
     !selectedWell() ||
-    !project.frames.some((_, i) => C.boundaryNeedsReview(selectedWell(), i));
+    !C.analysisIndices(project).some((i) =>
+      C.boundaryNeedsReview(selectedWell(), i),
+    );
   $("nextLabel").hidden =
     !sequence ||
     workflowStage !== "review" ||
     !selectedWell() ||
     ["empty", "multiple"].includes(selectedWell().occupancy) ||
-    !project.frames.some(
-      (_, i) => !project.records[C.key(i, selected)]?.correction?.state,
+    !C.analysisIndices(project).some(
+      (i) => !project.records[C.key(i, selected)]?.correction?.state,
     );
   $("predictionDetails").hidden =
     workflowStage !== "review" || !selectedWell() || !record().model;
 
+  [...$("model").options].forEach((option) => {
+    const m = models.find((m) => m.id === option.value);
+    option.disabled =
+      m?.available === false || (m?.requires_sequence && !sequence);
+  });
+  if (
+    models.find((m) => m.id === $("model").value)?.requires_sequence &&
+    !sequence
+  )
+    $("model").value = "manual";
   $("modelOptions").hidden = !models.some((model) => model.id !== "manual");
   $("clearRegion").hidden = !project.detection_region;
   $("comparisonOptions").hidden = $("datasetTest").checked || study !== "ccrt";
@@ -1622,6 +1727,11 @@ function updateContext() {
       : $("layout").value === "individual"
         ? "Single-well detection fits one dominant rim in a close crop. Draw a boundary or select the full image if no rim is visible."
         : "Size and repeated-spacing filters reduce fixture proposals. Set a diameter when automatic estimation is wrong, or draw a detection region to exclude hardware.";
+  $("timeline").min = workflowStage === "images" ? 0 : C.analysisStart(project);
+  $("jump").min = Number($("timeline").min) + 1;
+  $("analysisStart").max = files.length || 1;
+  $("analysisWindowInfo").textContent =
+    `${C.analysisIndices(project).length} analysis frames; frames before ${C.analysisStart(project) + 1} are setup only. Original image IDs and timer positions are retained.`;
   $("diameter").closest("label").hidden =
     $("detectionMethod").value === "contours";
   document
@@ -1651,7 +1761,7 @@ function labelRange(state, first, last) {
   if (
     !Number.isInteger(first) ||
     !Number.isInteger(last) ||
-    first < 0 ||
+    first < C.analysisStart(project) ||
     last < first ||
     last >= files.length
   )
@@ -1684,7 +1794,8 @@ function labelRange(state, first, last) {
 $("labelComa").onclick = () => labelRange("coma", index, index);
 $("labelAwake").onclick = () => labelRange("awake", index, index);
 $("labelUncertain").onclick = () => labelRange("unknown", index, index);
-$("comaUntil").onclick = () => labelRange("coma", 0, index);
+$("comaUntil").onclick = () =>
+  labelRange("coma", C.analysisStart(project), index);
 $("awakeFrom").onclick = () => labelRange("awake", index, files.length - 1);
 $("applyRange").onclick = () =>
   labelRange(
@@ -1731,7 +1842,7 @@ $("report").onclick = async () => {
             .filter((i) =>
               project.wells.some((w) => C.activeWell(w, i) && !C.imageArea(w)),
             )
-        : [0];
+        : [C.analysisStart(project)];
     for (const frame of frames) {
       if (cancelled) throw Error("Report export cancelled.");
       entries.push({
@@ -1741,7 +1852,7 @@ $("report").onclick = async () => {
     }
     entries.push({
       name: "README.txt",
-      text: `FlyScope ${study} results\nOpen report.html for the human report. results.csv contains compact ${study === "eggs" ? "independent-image counts" : "one-row-per-well occupancy, observed durations and sampled CCRT"}. summary.csv contains two-column experimental measurements. Missing values are not zero. Machine analysis is a separate export with frame-level labels and provenance. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first frame; IDs stay stable through camera corrections. The included project.json restores editable boundaries, annotations, model provenance and history via Import report. Training datasets are a separate export.\n`,
+      text: `FlyScope ${study} results\nOpen report.html for the human report. results.csv contains compact ${study === "eggs" ? "independent-image counts" : "one-row-per-well occupancy, recovery frame IDs and CCRT seconds only when the time reference is known"}. summary.csv contains two-column experimental measurements. Missing values are not zero. Machine analysis is a separate export with frame-level labels and provenance. well-locations.csv gives normalized percentage locations with matching numbered maps in maps/. CCRT maps refer to the first analysis frame; IDs stay stable through camera corrections. The included project.json restores editable boundaries, annotations, model provenance and history via Import report. Training datasets are a separate export.\n`,
     });
     download(
       `flyscope-${study}-report.zip`,
@@ -1820,6 +1931,7 @@ function nextMissing(kind) {
   if (!well || busy) return;
   for (let step = 1; step <= files.length; step++) {
     const frame = (index + step) % files.length;
+    if (frame < C.analysisStart(project)) continue;
     if (
       kind === "boundary"
         ? C.boundaryNeedsReview(well, frame)
@@ -2019,4 +2131,80 @@ $("setRegion").onclick = () => {
   $("tool").value = "region";
   canvas.focus();
   status("Drag a rectangle around the area where wells should be detected.");
+};
+
+$("analysisStart").onchange = () => {
+  const value = Number($("analysisStart").value) - 1;
+  if (!Number.isInteger(value) || value < 0 || value >= files.length) {
+    $("analysisStart").value = C.analysisStart(project) + 1;
+    return;
+  }
+  const previous = C.analysisStart(project);
+  project.analysis_start_index = value;
+  if (value !== previous) {
+    for (const w of project.wells) {
+      if (
+        Object.entries(project.records).some(
+          ([k, r]) => k.endsWith(":" + w.uid) && r.model?.requires_sequence,
+        )
+      )
+        invalidate(w.uid, null);
+    }
+  }
+  history("set-analysis-start", {
+    frame_index: value,
+    frame_id: project.frames[value].id,
+  });
+  if (project.records && study === "ccrt") C.applyRecoveryPolicy(project);
+  moveTo(value);
+};
+$("startHere").onclick = () => {
+  $("analysisStart").value = index + 1;
+  $("analysisStart").onchange();
+};
+$("inputKind").onchange = () => {
+  project.input_kind = $("inputKind").value;
+  if (project.input_kind === "trimmed") {
+    $("timeConfirmed").checked = false;
+    $("sourceFirstFrame").value = "";
+    project.source_first_frame_number = null;
+  }
+  setTimeOrigin();
+  updateDetails();
+};
+$("sourceFirstFrame").onchange = () => {
+  const value = $("sourceFirstFrame").value
+    ? Number($("sourceFirstFrame").value)
+    : null;
+  if (value !== null && (!Number.isInteger(value) || value < 1)) return;
+  project.source_first_frame_number = value;
+  history("set-source-first-frame", { value });
+};
+$("gridSpecies").onchange = () => {
+  project.species = $("gridSpecies").value.trim();
+  history("set-grid-species", { species: project.species });
+  renderSummary();
+};
+$("wellSpecies").onchange = () => {
+  const w = selectedWell();
+  if (w) {
+    w.species = $("wellSpecies").value.trim();
+    history("set-well-species", { uid: w.uid, species: w.species });
+    renderSummary();
+  }
+};
+$("decisionThreshold").onchange = $("awakeFrames").onchange = () => {
+  try {
+    const policy = {
+      confidence_threshold: Number($("decisionThreshold").value),
+      awake_consecutive_frames: Number($("awakeFrames").value),
+    };
+    C.applyRecoveryPolicy(project, policy);
+    project.recovery_policy = policy;
+    history("set-recovery-policy", policy);
+    updateDetails();
+    draw();
+  } catch (e) {
+    status(e.message);
+  }
 };
