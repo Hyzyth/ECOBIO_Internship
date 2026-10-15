@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Long-lived inference worker; model dependencies stay outside the Flask venv."""
+"""Long-lived inference worker; same interpreter as Flask."""
 import argparse
 import json
 from pathlib import Path

@@ -26,7 +26,7 @@ from backend.services.keras_adapter import (
     preprocess,
     occupancy_features,
     fit_occupancy,
-    tensorflow,
+    keras_runtime,
 )
 
 
@@ -151,15 +151,17 @@ def train(
     learning_rate=0.0001,
     mode="finetune",
 ):
-    tf = tensorflow()
-    tf.keras.utils.set_random_seed(run["seed"])
-    tf.config.experimental.enable_op_determinism()
+    keras = keras_runtime()
+    keras.utils.set_random_seed(run["seed"])
+    from backend.services.suite_models import torch_setup
+
+    torch_setup(run["seed"], "auto")
     base = adapter.load()
-    model = tf.keras.models.clone_model(base)
+    model = keras.models.clone_model(base)
     if mode == "finetune":
         model.set_weights(base.get_weights())
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate),
+        optimizer=keras.optimizers.Adam(learning_rate),
         loss="sparse_categorical_crossentropy",
     )
     selected = [dataset.annotations[k] for k in run["annotation_ids"]]
@@ -216,7 +218,7 @@ def train(
         "test_data_used_for_training": False,
     }
     (output / "model.json").write_text(json.dumps(metadata, indent=2))
-    tf.keras.backend.clear_session()
+    keras.backend.clear_session()
     adapter.model = None
     return KerasAdapter(path, metadata["name"], metadata)
 

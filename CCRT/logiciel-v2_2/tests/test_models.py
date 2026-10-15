@@ -18,8 +18,8 @@ from backend.services.detection import detect_wells, _clean_single_polygon
 
 class ModelTests(unittest.TestCase):
     @unittest.skipUnless(
-        importlib.util.find_spec("tensorflow"),
-        "Install requirements-models.txt for CNN checks",
+        importlib.util.find_spec("keras"),
+        "Install requirements.txt for CNN checks",
     )
     def test_original_models_predict_real_probabilities_with_explicit_occupancy(self):
         image = np.full((250, 250, 3), 150, np.uint8)

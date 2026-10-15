@@ -1,5 +1,0 @@
-# Optional CPU model inference / reproducible fine-tuning. Tested on Python 3.10.7/Linux.
--r requirements.txt
-tensorflow-cpu==2.21.0
-# Keras 3.13+ requires Python >=3.11; preserve the deployment runtime.
-keras==3.12.4

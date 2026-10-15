@@ -1,6 +1,0 @@
-# Optional NVIDIA runtime, matching the tested architecture/API versions.
-# CUDA hardware/driver availability must be checked on the training workstation.
---extra-index-url https://download.pytorch.org/whl/cu124
-torch==2.4.1+cu124
-torchvision==0.19.1+cu124
--r requirements-suite-common.txt

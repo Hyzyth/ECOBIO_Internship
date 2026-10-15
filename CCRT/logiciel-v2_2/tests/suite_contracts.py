@@ -1,4 +1,4 @@
-"""Run in the isolated suite runtime: python -m unittest tests.suite_contracts -v."""
+"""Run in the shared app environment: python -m unittest tests.suite_contracts -v."""
 
 import copy
 import json

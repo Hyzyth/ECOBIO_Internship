@@ -18,18 +18,19 @@ CLASSES = {"coma": 0, "awake": 1}
 MODELS = Path(__file__).resolve().parents[1] / "models"
 
 
-def tensorflow():
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-    os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "2")
-    os.environ.setdefault("TF_NUM_INTEROP_THREADS", "2")
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+def keras_runtime():
+    os.environ.setdefault("KERAS_BACKEND", "torch")
     try:
-        import tensorflow as tf
+        import keras
     except ImportError as exc:
         raise RuntimeError(
-            "Install requirements-models.txt to run or fine-tune the CNNs."
+            "Install requirements.txt to run or fine-tune the CNNs."
         ) from exc
-    return tf
+    if keras.backend.backend() != "torch":
+        raise RuntimeError(
+            "FlyScope uses Keras with its Torch backend. Start with KERAS_BACKEND=torch."
+        )
+    return keras
 
 
 def crop_well(image, points):
@@ -163,7 +164,7 @@ class KerasAdapter:
 
     def load(self):
         if self.model is None:
-            self.model = tensorflow().keras.models.load_model(
+            self.model = keras_runtime().models.load_model(
                 self.path, compile=False, safe_mode=True
             )
             if (
@@ -188,14 +189,19 @@ class KerasAdapter:
                 )
             )
             inputs.append(preprocess(crop, mask))
+        import torch
+
         with self.lock:
             model = self.load()
-            probabilities = np.concatenate(
-                [
-                    np.asarray(model(np.asarray(inputs[i : i + 8]), training=False))
-                    for i in range(0, len(inputs), 8)
-                ]
-            )
+            with torch.inference_mode():
+                probabilities = np.concatenate(
+                    [
+                        keras_runtime().ops.convert_to_numpy(
+                            model(np.asarray(inputs[i : i + 8]), training=False)
+                        )
+                        for i in range(0, len(inputs), 8)
+                    ]
+                )
         if (
             probabilities.shape != (len(wells), 2)
             or not np.isfinite(probabilities).all()

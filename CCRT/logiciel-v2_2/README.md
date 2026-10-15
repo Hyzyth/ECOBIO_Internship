@@ -1,21 +1,22 @@
 # FlyScope — model-independent experimental review
 
-This local Flask app has separate **CCRT** (`/ccrt`) and **Egg counting** (`/eggs`) pages. It supports manual dataset preparation, reproducible model comparisons and experimental review. The two original Keras coma/awake models are selectable on the CCRT page and load lazily. An egg counter is not supplied; egg annotations remain independent-image counts. Manual mode stays available. The ResNet-18, SLEAP/random-forest and DeepEthogram training/inference suite is implemented; see [MODEL_WORKFLOW.md](MODEL_WORKFLOW.md) for the complete Python 3.10.7 setup and shared-data comparisons.
+This local Flask app has separate **CCRT** (`/ccrt`) and **Egg counting** (`/eggs`) pages. It supports manual dataset preparation, reproducible model comparisons and experimental review. The two original Keras coma/awake models are selectable on the CCRT page and load lazily. An egg counter is not supplied; egg annotations remain independent-image counts. Manual mode stays available. The ResNet-18, SLEAP/random-forest and DeepEthogram training/inference suite is implemented; see **[WORKFLOW.md](WORKFLOW.md)** for the structured setup-to-evaluation guide, using one Python 3.12 environment and one requirements file.
 
 ## Run
 
-The deployment target is **Python 3.10.7 on Linux**, matching `.python-version` and the original Windows project's Python version. From `CCRT/logiciel-v2_2`, use your installed Python 3.10.7 explicitly:
+Use Python 3.12 (tested on 3.12.12) from `CCRT/logiciel-v2_2`:
 
 ```sh
-python3.10 --version  # Expected: Python 3.10.7
-python3.10 -m venv .venv
-.venv/bin/python -m pip install -r requirements-models.txt
-.venv/bin/python app.py
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python tools/check_runtime.py --prepare-models
+python app.py
 ```
 
-If that interpreter is unavailable and you use `uv`, `uv python install 3.10.7` followed by `uv venv --python 3.10.7 --seed .venv` creates the same runtime. On Windows, use `py -3.10 --version`, `py -3.10 -m venv .venv`, and `.venv\Scripts\python.exe` instead of `.venv/bin/python`; check the exact patch version before installation.
+The same environment runs every model and trainer. The Linux Torch wheel includes CUDA 12.8 and Blackwell support; CPU execution is also available. See [WORKFLOW.md](WORKFLOW.md) for OS libraries, the RTX PRO 3000 GPU check, exports, training and evaluation. TensorFlow and separate suite/pose interpreter paths are no longer required. Keep Keras's backend unset or `torch`.
 
-Open the local server on port 5000 in your browser. In the prepared cloud machine use `/workspace/ecobio-venv-3107/bin/python app.py` from the same directory. This is a local development application, not a multi-user hosted service. The tested Linux environment is x86_64; the pinned Linux binary packages require glibc 2.28 or newer. Windows and other CPU architectures have not been runtime-tested here.
+Open the local server on port 5000 in your browser. In the prepared cloud machine use `/workspace/ecobio-unified-venv/bin/python`. The tested platform is Linux x86_64. No physical NVIDIA GPU is attached to the cloud validation machine.
 
 ## Review workflow
 
@@ -31,7 +32,7 @@ Egg counting uses **Images → Count → Export** by default, with no well layou
 4. Select a well to see masked T−1 / T / T+1 crops. Navigate with buttons, arrow keys, frame slider or jump input; adjust playback FPS separately from the acquisition interval. Red/C means coma, green/A awake, gray/? unknown, cyan/E empty and purple/! multiple individuals and amber/U low-confidence model output. Use the quick **Coma**, **Awake** and **Uncertain** buttons, or open **Notes and detailed annotation** for current-frame state and notes fields. **Coma through this frame** labels the analysis start…T inclusive; **Awake from this frame onward** labels T…last inclusive. Custom ranges are also inclusive. Existing manual labels require confirmation before replacement, and the last quick/range operation can be undone without restoring old model predictions or erasing newer edits. Ambiguous transition frames can remain uncertain. Egg count controls appear only on the egg page.
 5. Choose **Report ZIP** for readable results, summaries and numbered location maps; **readable results CSV** omits polygon arrays. Choose **Training dataset ZIP** for original images, masked crops, manual labels and frame-specific boundaries. **Project backup JSON** preserves normalized boundaries, per-frame overrides, model/version/confidence, manual corrections, history and summaries. To resume, select the same image files in the same order, then restore JSON. Images are identified by path, size and modification time, not embedded or hashed. Export before leaving: browser memory is not permanent storage.
 
-Summaries use effective states, including manual overrides. Select the first analysis frame to exclude raw setup images without resetting original frame numbers or time offsets. Already-trimmed input clears the assumed timing reference; enter a known delay if available. Human reports prioritize the first Awake frame, filename and frame ID; CCRT seconds require an observed Coma→Awake transition and confirmed timing. Unknown gaps, later coma labels, already-awake wells, missing recovery and unverified timing yield explicit statuses. Single occupancy must be confirmed before CCRT measurements are emitted. Machine exports retain observed-window durations and timing bounds, with no invented duration after the final observation. Single-image mode has no temporal metrics. See [MODEL_WORKFLOW.md](MODEL_WORKFLOW.md) for confidence/streak decisions, species metadata and dataset timing semantics.
+Summaries use effective states, including manual overrides. Select the first analysis frame to exclude raw setup images without resetting original frame numbers or time offsets. Already-trimmed input clears the assumed timing reference; enter a known delay if available. Human reports prioritize the first Awake frame, filename and frame ID; CCRT seconds require an observed Coma→Awake transition and confirmed timing. Unknown gaps, later coma labels, already-awake wells, missing recovery and unverified timing yield explicit statuses. Single occupancy must be confirmed before CCRT measurements are emitted. Machine exports retain observed-window durations and timing bounds, with no invented duration after the final observation. Single-image mode has no temporal metrics. See [WORKFLOW.md](WORKFLOW.md) for confidence/streak decisions, species metadata and dataset timing semantics.
 
 ## Integrating future models
 
@@ -88,7 +89,7 @@ This checks detection-region selection, full-sequence alignment, stable identiti
 
 ## Reports and training datasets
 
-**Human report ZIP** contains `report.html` to open directly, compact `results.csv` (one row per CCRT well), two-column `summary.csv`, `report.json` and an editable `project.json` backup. CCRT rows show occupancy, observed coma/awake/uncertain duration, sampled CCRT and status. Empty wells, multiple individuals and unverified occupancy cannot produce CCRT measurements. Use **Confirm unchecked wells contain one individual** after checking them to avoid approving each well separately. Well boundaries stay out of the human result table; `well-locations.csv` and numbered maps identify the wells on the reference frame. Egg reports contain independent image counts; custom-area maps are optional.
+**Human report ZIP** contains `report.html` to open directly, compact `results.csv` (one row per CCRT well), two-column `summary.csv`, `report.json` and an editable `project.json` backup. CCRT rows show occupancy, the first Awake frame/image/ID, optional CCRT seconds and status. Observed durations remain in machine exports. Empty wells, multiple individuals and unverified occupancy cannot produce CCRT measurements. Use **Confirm unchecked wells contain one individual** after checking them to avoid approving each well separately. Well boundaries stay out of the human result table; `well-locations.csv` and numbered maps identify the wells on the reference frame. Egg reports contain independent image counts; custom-area maps are optional.
 
 **Machine analysis ZIP** retains frame-level labels, normalized boundaries, stable IDs, prediction confidence/model version, separate manual corrections, recovery bounds, timing metadata and history in `machine.json`, `frames.csv`, `recovery.csv` and `project.json`. Those extras let scripts reconstruct timelines, associate labels with image pixels and audit reproducibility; they are unnecessary columns in a human summary. Machine exports contain no image pixels; use the training export when images are needed. Human, machine and training ZIPs restore editable projects through **Import report**. Evaluation-only test ZIPs deliberately omit project backups.
 
@@ -127,7 +128,7 @@ For CCRT, **Empty** occupancy applies to the entire well: its outline turns cyan
 
 ## Original models and reproducible comparisons
 
-Install `requirements-models.txt` for the CNNs and training tools. TensorFlow CPU 2.21.0 and Keras 3.12.4 are tested on Python 3.10.7/Linux. Keras is deliberately pinned below 3.13, which dropped Python 3.10 support. For manual review alone, `requirements.txt` suffices. Model loading is lazy and bounded to small CPU batches. Choose **Original CNN 1** or **Original CNN 2**, then analyze the image/sequence. Predictions retain class probabilities, artifact/preprocessing version and occupancy-method provenance; manual labels remain separate.
+`requirements.txt` includes Keras with its Torch backend for both original CNNs and fine-tuning. Loading is lazy. Choose Original CNN 1 or 2 in CCRT to analyze images/sequences; model probabilities/version and manual labels remain separate. Full commands and migration notes are in [WORKFLOW.md](WORKFLOW.md).
 
 Both supplied artifacts accept 200×200 grayscale images and output **coma, awake** in the order documented by the original `backend/services/cnn.py`. They have no trained Empty class. Shared inference/training preprocessing reproduces contrast alpha=1.5/beta=120, BGR-to-gray, Otsu threshold, 200×200 resize and normalization. Polygon-exterior pixels are replaced with the interior background before thresholding, then white, to exclude other wells; this mask adaptation is explicitly versioned. The legacy networks' original training-set provenance is not supplied.
 
@@ -167,6 +168,6 @@ Unzip each dataset and run from `CCRT/logiciel-v2_2`:
 
 `--mode scratch` uses the same architectures and selections with fresh initialization; default `finetune` copies parent weights. Outputs include the unchanged plan, per-grid confusion matrices/class precision/recall/F1, raw predictions with scored/unscored flags, `summary.csv`, trained `model.keras` files and sidecars documenting seed, exact samples, parent version, preprocessing and hyperparameters. No train/validation/test split is secretly regenerated per model; test grids are external. Related frames should stay together, and experimental independence must still be established by the researcher.
 
-To select trained artifacts in the app, set `FLYSCOPE_MODELS_DIR` to the comparison output directory before restarting Flask. Sidecars are discovered recursively and checked against the model hash/preprocessing contract. Keep datasets, generated weights and research results outside Git. This legacy trainer implements the two original Keras architectures. The new three-family suite uses `tools/model_suite.py` and `FLYSCOPE_SUITE_MODELS_DIR`; see [MODEL_WORKFLOW.md](MODEL_WORKFLOW.md).
+To select trained artifacts in the app, set `FLYSCOPE_MODELS_DIR` to the comparison output directory before restarting Flask. Sidecars are discovered recursively and checked against the model hash/preprocessing contract. Keep datasets, generated weights and research results outside Git. This legacy trainer implements the two original Keras architectures. The new three-family suite uses `tools/model_suite.py` and `FLYSCOPE_SUITE_MODELS_DIR`; see [WORKFLOW.md](WORKFLOW.md).
 
 With the server running, `tests/experiments-browser.cjs` checks actual partial-grid training/test ZIPs, fixed selections, model predictions, supervised Empty exports and the single-well limit. `tests/test_experiment_data.py` checks held-out group/hash separation, immutable sample membership and scoring only annotated wells. The supplied crop labels and synthetic workflow checks do not establish out-of-sample biological accuracy.
