@@ -1,4 +1,4 @@
-"""App adapters for separately installed PyTorch/pose inference runtimes."""
+"""App inference workers using the current Python environment."""
 
 import atexit
 from collections import OrderedDict
@@ -9,6 +9,7 @@ import selectors
 import subprocess
 import tempfile
 import threading
+import sys
 
 WORKERS = OrderedDict()
 WORKER_LOCK = threading.RLock()
@@ -21,15 +22,8 @@ class SuiteAdapter:
         self.process = None
         self.stderr = None
         self.lock = threading.Lock()
-        self.python = os.environ.get("FLYSCOPE_SUITE_PYTHON")
-        self.available = bool(
-            self.python
-            and Path(self.python).is_file()
-            and (
-                meta["architecture"] != "sleap-rf"
-                or os.environ.get("FLYSCOPE_SLEAP_PYTHON")
-            )
-        )
+        self.python = sys.executable
+        self.available = True
         self.metadata = {
             "name": meta["name"],
             "version": meta["version"],
@@ -61,7 +55,7 @@ class SuiteAdapter:
     def predict_sequence(self, content, wells, session=None, frame=None):
         if not self.available:
             raise ValueError(
-                "Configure the suite and SLEAP interpreters before selecting this trained model."
+                "Install requirements.txt before selecting this trained model."
             )
         with self.lock:
             if self.process is None or self.process.poll() is not None:

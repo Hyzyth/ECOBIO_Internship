@@ -1,4 +1,4 @@
-"""Real CCRT model implementations, imported only by the isolated ML runtime.
+"""CCRT models sharing the app's PyTorch runtime.
 
 A: torchvision ResNet-18. B: SLEAP confidence maps + sklearn random forest.
 C: DeepEthogram TinyMotionNet, hidden two-stream ResNet features and TGM.
@@ -11,9 +11,6 @@ import itertools
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
-import tempfile
 import numpy as np
 import cv2
 from backend.services.keras_adapter import crop_well, occupancy_features
@@ -51,13 +48,16 @@ def torch_setup(seed=2026, device="auto"):
     np.random.seed(seed % 2**32)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-    torch.use_deterministic_algorithms(True)
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda" and not torch.cuda.is_available():
         raise ValueError(
             "CUDA requested, but this runtime has no available CUDA device."
         )
+    # CUDA grid_sample backward (optical flow) has no deterministic kernel.
+    # Preserve seeded selections/training; warn about that kernel instead of
+    # aborting all GPU flow training. CPU keeps strict deterministic checks.
+    torch.use_deterministic_algorithms(True, warn_only=device == "cuda")
     return torch.device(device)
 
 
@@ -93,12 +93,18 @@ def make_resnet(initialization="imagenet"):
 
 def make_deepethogram(window=5, initialization="imagenet"):
     import torch
-    from deepethogram.flow_generator.models.TinyMotionNet import TinyMotionNet
-    from deepethogram.feature_extractor.models.CNN import get_cnn
-    from deepethogram.feature_extractor.models.hidden_two_stream import (
-        build_fusion_layer,
-    )
-    from deepethogram.sequence.models.tgm import TGM
+    from torchvision.models import resnet18
+    from backend.services.upstream_architectures import architectures
+
+    TinyMotionNet, TGM = architectures()
+
+    class Fusion(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = torch.nn.Linear(1024, 3)
+
+        def forward(self, rgb, motion):
+            return self.fc(torch.cat([rgb, motion], dim=1))
 
     class Network(torch.nn.Module):
         def __init__(self):
@@ -106,13 +112,12 @@ def make_deepethogram(window=5, initialization="imagenet"):
             self.motion = TinyMotionNet(num_images=window)
 
             def initialized_cnn(channels):
-                cnn = get_cnn(
-                    "resnet18",
-                    in_channels=channels,
-                    num_classes=3,
-                    reload_imagenet=False,
-                    dropout_p=0,
-                )
+                backbone = resnet18(weights=None)
+                if channels != 3:
+                    backbone.conv1 = torch.nn.Conv2d(channels, 64, 7, 2, 3, bias=False)
+                backbone.fc = torch.nn.Identity()
+                # Match the original DeepEthogram feature/classifier key layout.
+                cnn = torch.nn.Sequential(backbone, torch.nn.Identity())
                 if initialization == "imagenet":
                     from torchvision.models import ResNet18_Weights
 
@@ -131,9 +136,7 @@ def make_deepethogram(window=5, initialization="imagenet"):
 
             spatial = initialized_cnn(3)
             flow = initialized_cnn((window - 1) * 2)
-            self.spatial, self.flow, self.fusion = build_fusion_layer(
-                spatial, flow, "concatenate", 3
-            )
+            self.spatial, self.flow, self.fusion = spatial, flow, Fusion()
             self.temporal = TGM(
                 D=1024,
                 classes=3,
@@ -275,62 +278,21 @@ def model_version(meta):
 
 
 class PoseWorker:
-    def __init__(self, model, python=None):
+    """Shared-environment pose inference; no interpreter configuration required."""
+
+    def __init__(self, model, device="cpu"):
         self.root = Path(model).resolve()
-        self.python = python or os.environ.get("FLYSCOPE_SLEAP_PYTHON")
-        if not self.python:
-            raise ValueError(
-                "Set FLYSCOPE_SLEAP_PYTHON to the isolated SLEAP Python 3.10.7 interpreter."
-            )
-        self.worker = None
+        self.device = device
 
     def predict(self, images, identities):
-        with tempfile.TemporaryDirectory(prefix="flyscope-pose-") as tmp:
-            root = Path(tmp)
-            rows = []
-            for n, (im, identity) in enumerate(zip(images, identities)):
-                path = root / f"image-{n}.png"
-                cv2.imwrite(str(path), cv2.cvtColor(im, cv2.COLOR_RGB2BGR))
-                rows.append({"id": identity, "path": str(path)})
-            request = root / "request.json"
-            output = root / "poses.json"
-            request.write_text(json.dumps({"images": rows}))
-            if self.worker is None or self.worker.poll() is not None:
-                command = [
-                    self.python,
-                    str(Path(__file__).resolve().parents[2] / "tools/sleap_pose.py"),
-                    "serve",
-                    "--model",
-                    str(self.root),
-                ]
-                self.worker = subprocess.Popen(
-                    command,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    text=True,
-                    bufsize=1,
-                )
-            self.worker.stdin.write(
-                json.dumps({"request": str(request), "output": str(output)}) + "\n"
-            )
-            self.worker.stdin.flush()
-            answer = self.worker.stdout.readline()
-            if not answer:
-                raise RuntimeError(
-                    "SLEAP worker stopped. Check its runtime and model metadata."
-                )
-            answer = json.loads(answer)
-            if answer.get("error"):
-                raise RuntimeError(answer["error"])
-            return json.loads(output.read_text())
+        from tools.sleap_pose import infer_images
+
+        return infer_images(self.root, images, identities, device=self.device)
 
     def close(self):
-        if self.worker is not None:
-            self.worker.stdin.close()
-            try:
-                self.worker.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.worker.terminate()
+        from tools.sleap_pose import clear_cache
+
+        clear_cache()
 
 
 def forest_export(forest):
@@ -390,7 +352,7 @@ class SuiteModel:
         self.pose = None
         if self.kind == "sleap-rf":
             self.forest = json.loads((self.root / "forest.json").read_text())
-            self.pose = PoseWorker(self.root / "pose")
+            self.pose = PoseWorker(self.root / "pose", device=device)
         else:
             import torch
 

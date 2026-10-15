@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
-"""Isolated Python 3.10 SLEAP pose pretraining and batched keypoint inference.
+"""SLEAP-NN PyTorch anatomical pose training and inference in the app environment.
 
-Native SLP annotations provide anatomical targets, never coma/awake labels.
-The exported confidence-map model uses SLEAP's actual UNet backbone. Keeping
-this worker separate avoids conflicting TensorFlow/Keras versions in the app.
+Native SLP keypoints provide anatomical targets, never Coma/Awake labels.
 """
 import argparse
 import hashlib
 import json
-import os
 import sys
 from types import SimpleNamespace
 from pathlib import Path
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/flyscope-sleap-mpl")
-os.environ.setdefault("XDG_CACHE_HOME", "/tmp/flyscope-sleap-cache")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-os.environ.setdefault("TF_NUM_INTRAOP_THREADS", "2")
-os.environ.setdefault("TF_NUM_INTEROP_THREADS", "2")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import cv2
 import numpy as np
 
@@ -34,41 +26,62 @@ def sha(path):
 
 
 def network(config):
-    import tensorflow as tf
-    from sleap.nn.architectures.unet import UNet
+    import torch
+    from sleap_nn.architectures.unet import UNet
 
-    x = tf.keras.Input((config["size"], config["size"], 3))
-    features, _ = UNet(
-        filters=config["filters"], down_blocks=3, up_blocks=3
-    ).make_backbone(x)
-    heatmaps = tf.keras.layers.Conv2D(
-        len(config["nodes"]), 1, name="anatomical_confidence_maps"
-    )(features)
-    return tf.keras.Model(x, heatmaps)
+    class PoseNetwork(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backbone = UNet(
+                in_channels=3,
+                output_stride=1,
+                filters=config["filters"],
+                filters_rate=2,
+                down_blocks=3,
+                up_blocks=3,
+            )
+            self.head = torch.nn.Conv2d(config["filters"], len(config["nodes"]), 1)
+
+        def forward(self, images):
+            return self.head(self.backbone(images)["outputs"][-1])
+
+    return PoseNetwork()
+
+
+def read_meta(root):
+    root = Path(root)
+    meta = json.loads((root / "pose.json").read_text())
+    if meta.get("framework") != "pytorch":
+        raise ValueError(
+            "This is a legacy TensorFlow pose checkpoint. Retrain the pose estimator from its original .slp labels with tools/sleap_pose.py train, then retrain the SLEAP/RF selections. Image/annotation exports remain compatible."
+        )
+    if sha(root / "pose.pt") != meta["weights_sha256"]:
+        raise ValueError("Pose weights do not match their metadata hash.")
+    return meta
+
+
+def clear_cache():
+    MODEL_CACHE.clear()
 
 
 def centered_examples(labels, size):
-    import sleap
+    import sleap_io as sio
 
     source = Path(labels).resolve()
-
-    # Resolve moved videos explicitly through SLEAP's supported callback, rather
-    # than consulting GUI preferences in the user's home directory.
-    def locate(videos):
-        for video in videos:
-            backend = video["backend"]
-            filename = backend["filename"]
-            if not Path(filename).is_file():
-                candidate = (
-                    source.parent / str(filename).replace("\\", "/").split("/")[-1]
-                )
-                if not candidate.is_file():
-                    raise ValueError(
-                        f"SLP video is missing: {candidate.name}. Keep its video next to the labels."
-                    )
-                backend["filename"] = str(candidate)
-
-    data = sleap.Labels.load_file(str(source), video_search=locate)
+    data = sio.load_slp(str(source), open_videos=False)
+    for video in data.videos:
+        filename = str(video.filename)
+        candidates = [
+            Path(filename),
+            source.parent / filename,
+            source.parent / filename.replace("\\", "/").split("/")[-1],
+        ]
+        found = next((p for p in candidates if p.is_file()), None)
+        if found is None:
+            raise ValueError(
+                f"SLP video is missing: {filename}. Keep its video next to the labels."
+            )
+        video.replace_filename(str(found.resolve()))
     if len(data.skeletons) != 1:
         raise ValueError("Use one anatomical skeleton per pose model.")
     nodes = data.skeletons[0].node_names
@@ -79,7 +92,7 @@ def centered_examples(labels, size):
             continue
         key = (frame.video.filename, frame.frame_idx)
         if key not in image_cache:
-            image_cache[key] = frame.video[frame.frame_idx][0]
+            image_cache[key] = frame.video[frame.frame_idx]
         image = image_cache[key]
         if image.shape[-1] == 1:
             image = np.repeat(image, 3, axis=-1)
@@ -121,16 +134,18 @@ def centered_examples(labels, size):
 
 
 def train(args):
-    import sleap
-    import tensorflow as tf
+    import torch
+    from importlib.metadata import version
+    from backend.services.suite_models import torch_setup, tensor
+
+    device = torch_setup(args.seed, args.device)
 
     out = Path(args.output).resolve()
     if out.exists():
         raise ValueError("Pose output must be a new directory.")
-    tf.keras.utils.set_random_seed(args.seed)
     parent = None
     if args.parent:
-        parent = json.loads((Path(args.parent) / "pose.json").read_text())
+        parent = read_meta(args.parent)
         args.size = parent["configuration"]["size"]
         args.filters = parent["configuration"]["filters"]
     nodes, examples, data = centered_examples(args.labels, args.size)
@@ -140,25 +155,30 @@ def train(args):
         ]
         examples = [examples[i] for i in order]
     config = {"size": args.size, "filters": args.filters, "nodes": nodes}
-    model = network(config)
+    model = network(config).to(device)
     if parent:
         if (
             parent["configuration"]["nodes"] != nodes
-            or sha(Path(args.parent) / "pose.weights.h5") != parent["weights_sha256"]
+            or sha(Path(args.parent) / "pose.pt") != parent["weights_sha256"]
         ):
             raise ValueError(
                 "Parent pose skeleton or weights hash differs from the provided labels."
             )
-        model.load_weights(str(Path(args.parent) / "pose.weights.h5"))
-    optimizer = tf.keras.optimizers.Adam(args.learning_rate)
+        model.load_state_dict(
+            torch.load(
+                Path(args.parent) / "pose.pt", map_location=device, weights_only=True
+            )
+        )
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     yy, xx = np.mgrid[: args.size, : args.size]
     losses = []
+    model.train()
     for epoch in range(args.epochs):
         epoch_loss = []
         order = np.random.default_rng(args.seed + epoch).permutation(len(examples))
         for offset in range(0, len(order), args.batch_size):
             batch = [examples[i] for i in order[offset : offset + args.batch_size]]
-            x = np.stack([e[0] for e in batch]).astype(np.float32) / 255
+            x = tensor([e[0] for e in batch], device)
             targets, weights = [], []
             for _, points, visible, _ in batch:
                 heatmaps = np.exp(
@@ -170,30 +190,35 @@ def train(args):
                 )
                 targets.append(heatmaps)
                 weights.append(visible.astype(np.float32))
-            target = tf.constant(np.stack(targets), tf.float32)
-            mask = tf.constant(np.stack(weights)[:, None, None, :], tf.float32)
-            with tf.GradientTape() as tape:
-                predicted = model(x, training=True)
-                loss = tf.reduce_sum(tf.square(predicted - target) * mask) / (
-                    tf.reduce_sum(mask) * args.size**2
-                )
-            if not np.isfinite(float(loss)):
-                raise RuntimeError("Nonfinite pose loss; no artifact saved.")
-            optimizer.apply_gradients(
-                zip(
-                    tape.gradient(loss, model.trainable_weights),
-                    model.trainable_weights,
-                )
+            target = torch.as_tensor(
+                np.stack(targets).transpose(0, 3, 1, 2).copy(),
+                dtype=torch.float32,
+                device=device,
             )
-            epoch_loss.append(float(loss))
+            mask = torch.as_tensor(
+                np.stack(weights)[:, :, None, None], dtype=torch.float32, device=device
+            )
+            optimizer.zero_grad(set_to_none=True)
+            predicted = model(x)
+            loss = ((predicted - target).square() * mask).sum() / (
+                mask.sum() * args.size**2
+            )
+            value = float(loss.detach().cpu())
+            if not np.isfinite(value):
+                raise RuntimeError("Nonfinite pose loss; no artifact saved.")
+            loss.backward()
+            optimizer.step()
+            epoch_loss.append(value)
         losses.append(float(np.mean(epoch_loss)))
         print(json.dumps({"pose_epoch": epoch + 1, "loss": losses[-1]}), flush=True)
     out.mkdir(parents=True)
-    weights = out / "pose.weights.h5"
-    model.save_weights(str(weights))
+    weights = out / "pose.pt"
+    torch.save(model.state_dict(), weights)
     meta = {
         "kind": "flyscope-sleap-pose",
-        "sleap_version": sleap.__version__,
+        "framework": "pytorch",
+        "sleap_nn_version": version("sleap-nn"),
+        "device": str(device),
         "architecture": "SLEAP UNet / single-instance anatomical confidence maps",
         "configuration": config,
         "weights_sha256": sha(weights),
@@ -216,53 +241,76 @@ def train(args):
     return meta
 
 
-def predict(args):
-    root = Path(args.model).resolve()
-    meta = json.loads((root / "pose.json").read_text())
-    if sha(root / "pose.weights.h5") != meta["weights_sha256"]:
-        raise ValueError("Pose weights do not match their metadata hash.")
-    key = (str(root), meta["weights_sha256"])
+def infer_images(
+    root, images, identities, device="cpu", minimum_peak=0.05, batch_size=8
+):
+    import torch
+    from backend.services.suite_models import torch_setup, tensor
+
+    root = Path(root).resolve()
+    meta = read_meta(root)
+    selected_device = torch_setup(device=device)
+    key = (str(root), meta["weights_sha256"], str(selected_device))
     if key not in MODEL_CACHE:
-        model = network(meta["configuration"])
-        model.load_weights(str(root / "pose.weights.h5"))
+        model = network(meta["configuration"]).to(selected_device)
+        model.load_state_dict(
+            torch.load(
+                root / "pose.pt", map_location=selected_device, weights_only=True
+            )
+        )
         MODEL_CACHE.clear()
-        MODEL_CACHE[key] = model
+        MODEL_CACHE[key] = model.eval()
     model = MODEL_CACHE[key]
     size = meta["configuration"]["size"]
-    rows = json.loads(Path(args.request).read_text())["images"]
     output = []
-    for offset in range(0, len(rows), args.batch_size):
-        batch = rows[offset : offset + args.batch_size]
-        x = []
-        for row in batch:
-            image = cv2.imread(row["path"])
-            if image is None:
-                raise ValueError("Unreadable pose input.")
-            x.append(cv2.cvtColor(cv2.resize(image, (size, size)), cv2.COLOR_BGR2RGB))
-        maps = model(np.stack(x).astype(np.float32) / 255, training=False).numpy()
-        for row, heatmaps in zip(batch, maps):
+    for offset in range(0, len(images), batch_size):
+        batch = [
+            cv2.resize(im, (size, size)) for im in images[offset : offset + batch_size]
+        ]
+        with torch.inference_mode():
+            maps = (
+                model(tensor(batch, selected_device)).permute(0, 2, 3, 1).cpu().numpy()
+            )
+        for identity, heatmaps in zip(identities[offset : offset + batch_size], maps):
             points = []
             for k in range(heatmaps.shape[-1]):
-                y, x0 = np.unravel_index(
-                    np.argmax(heatmaps[..., k]), heatmaps.shape[:2]
-                )
-                peak = float(heatmaps[y, x0, k])
+                y, x = np.unravel_index(np.argmax(heatmaps[..., k]), heatmaps.shape[:2])
+                peak = float(heatmaps[y, x, k])
                 points.append(
                     {
-                        "x": float(x0 / size),
+                        "x": float(x / size),
                         "y": float(y / size),
                         "score": peak,
-                        "visible": peak >= args.minimum_peak,
+                        "visible": peak >= minimum_peak,
                     }
                 )
             output.append(
                 {
-                    "id": row["id"],
+                    "id": identity,
                     "nodes": meta["configuration"]["nodes"],
                     "points": points,
                 }
             )
-    Path(args.output).write_text(json.dumps(output))
+    return output
+
+
+def predict(args):
+    rows = json.loads(Path(args.request).read_text())["images"]
+    images = []
+    for row in rows:
+        image = cv2.imread(row["path"])
+        if image is None:
+            raise ValueError("Unreadable pose input.")
+        images.append(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    output = infer_images(
+        args.model,
+        images,
+        [r["id"] for r in rows],
+        args.device,
+        args.minimum_peak,
+        args.batch_size,
+    )
+    Path(args.output).write_text(json.dumps(output, allow_nan=False))
     return output
 
 
@@ -280,6 +328,7 @@ def main():
     t.add_argument("--learning-rate", type=float, default=0.001)
     t.add_argument("--sigma", type=float, default=3)
     t.add_argument("--max-examples", type=int)
+    t.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     t.add_argument(
         "--parent",
         help="Optional prior pose-model directory for fine-tuning with anatomical labels",
@@ -290,6 +339,7 @@ def main():
     i.add_argument("--output", required=True)
     i.add_argument("--batch-size", type=int, default=8)
     i.add_argument("--minimum-peak", type=float, default=0.05)
+    i.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     server = subs.add_parser("serve")
     server.add_argument("--model", required=True)
     args = p.parse_args()
@@ -319,6 +369,7 @@ def main():
                         output=request["output"],
                         batch_size=8,
                         minimum_peak=0.05,
+                        device="cpu",
                     )
                 )
                 print(json.dumps({"ok": True}), flush=True)

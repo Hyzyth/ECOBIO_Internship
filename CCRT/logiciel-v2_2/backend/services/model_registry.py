@@ -32,7 +32,7 @@ def available_models():
                 a.available
                 if hasattr(a, "available")
                 else (
-                    importlib.util.find_spec("tensorflow") is not None
+                    importlib.util.find_spec("keras") is not None
                     if hasattr(a, "load")
                     else True
                 )

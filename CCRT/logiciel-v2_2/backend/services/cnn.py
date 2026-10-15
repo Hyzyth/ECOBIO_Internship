@@ -1,12 +1,13 @@
 import cv2
 import numpy as np
-from tensorflow import keras
+from backend.services.keras_adapter import keras_runtime
+keras = keras_runtime()
 
 from backend.services.images import crop_image
 
 
 path_model = "backend/models/model1.keras"
-model = keras.models.load_model(path_model)
+model = keras.models.load_model(path_model, compile=False, safe_mode=True)
 
 img_width = 200
 img_height = 200

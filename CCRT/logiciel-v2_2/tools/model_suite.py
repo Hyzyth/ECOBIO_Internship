@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Matched CCRT training and held-out evaluation for all three model families.
 
-Use an isolated Python 3.10.7 runtime with requirements-suite.txt. Native
-SLEAP pose pretraining runs separately with tools/sleap_pose.py. No test grid
+Use the app environment installed from requirements.txt. Native
+SLEAP pose pretraining runs with the same Python interpreter with tools/sleap_pose.py. No test grid
 is used for training, threshold selection, early stopping or normalization.
 """
 import argparse
@@ -275,7 +275,7 @@ def train_model(kind, data, run, out, args):
         from sklearn.ensemble import RandomForestClassifier
 
         pose_source = Path(args.pose_model).resolve()
-        worker = PoseWorker(pose_source)
+        worker = PoseWorker(pose_source, device=args.device)
         features = []
         try:
             for offset in range(0, len(ids), args.batch_size):
@@ -514,7 +514,7 @@ def train_model(kind, data, run, out, args):
             else "fixed external SLEAP pose model"
         ),
         "pose_parent_sha256": (
-            digest(pose_source / "pose.weights.h5") if pose_source else None
+            digest(pose_source / "pose.pt") if pose_source else None
         ),
         "recovery_policy": {
             "confidence_threshold": args.confidence_threshold,
@@ -538,7 +538,19 @@ def train_model(kind, data, run, out, args):
         "python": sys.version.split()[0],
         "numpy": np.__version__,
         "torch": str(torch.__version__),
+        "cuda_runtime": torch.version.cuda,
+        "device": str(device),
+        "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+        "determinism": (
+            "strict"
+            if device.type == "cpu"
+            else "seeded; unsupported deterministic kernels warn"
+        ),
     }
+    if kind == "deepethogram":
+        from backend.services.upstream_architectures import WHEEL_SHA256
+
+        meta["upstream_architectures_sha256"] = WHEEL_SHA256
     meta["version"] = model_version(meta)
     (out / "model.json").write_text(json.dumps(meta, indent=2))
     return out / "model.json"
