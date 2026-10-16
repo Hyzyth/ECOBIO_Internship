@@ -47,8 +47,10 @@ def safe_path(root, relative):
 
 
 class Dataset:
-    def __init__(self, root, role):
+    def __init__(self, root, role, progress=None):
         self.root = Path(root).resolve()
+        if progress:
+            progress("loading_dataset", force=True, dataset=str(self.root), role=role)
         raw = (self.root / "annotations.json").read_bytes()
         self.sha = digest(raw)
         self.manifest = json.loads(raw)
@@ -68,11 +70,27 @@ class Dataset:
         self.role = role
         self.images = {image["path"]: image for image in self.manifest["images"]}
         self.image_hashes = set()
-        for relative, image in self.images.items():
+        if progress:
+            progress(
+                "verifying_images",
+                force=True,
+                dataset=str(self.root),
+                images=0,
+                total_images=len(self.images),
+            )
+        for index, (relative, image) in enumerate(self.images.items(), 1):
             actual = digest(safe_path(self.root, relative).read_bytes())
             if actual != image["sha256"]:
                 raise ValueError("Image content does not match the export hash.")
             self.image_hashes.add(actual)
+            if progress:
+                progress(
+                    "verifying_images",
+                    force=index == len(self.images),
+                    dataset=str(self.root),
+                    images=index,
+                    total_images=len(self.images),
+                )
         self.annotations = {}
         for a in self.manifest["annotations"]:
             if a["id"] in self.annotations:
