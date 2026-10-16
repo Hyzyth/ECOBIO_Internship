@@ -26,15 +26,17 @@ def _circles(gray, diameter=None, region=None):
     found = cv2.HoughCircles(contrast, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
                             minDist=max(10, low * 1.5), param1=250, param2=.8,
                             minRadius=low, maxRadius=high)
-    # Partial arcs need a lower Hough threshold, but only admit these extra
-    # candidates at the image edge. Size, rim support and repeated neighbours
-    # still validate them; no unseen lattice locations are invented.
+    # Weak interior rims need the relaxed pass too. Every added candidate must
+    # still pass rim coverage, dominant size and repeated-neighbour checks.
     border = cv2.HoughCircles(contrast, cv2.HOUGH_GRADIENT_ALT, dp=1.5,
                              minDist=max(10, low*1.5), param1=250, param2=.5,
                              minRadius=low, maxRadius=high)
     candidates_found = [] if found is None else list(found[0])
     if border is not None:
         candidates_found.extend(c for c in border[0] if c[0]-c[2]<0 or c[1]-c[2]<0 or c[0]+c[2]>=w or c[1]+c[2]>=h)
+    weak = cv2.HoughCircles(contrast, cv2.HOUGH_GRADIENT_ALT, dp=1.5, minDist=max(10, low*1.5), param1=200, param2=.65, minRadius=low, maxRadius=high)
+    if weak is not None:
+        candidates_found.extend(weak[0])
     if not candidates_found:
         return []
     edges = cv2.Canny(contrast, 40, 80)
@@ -91,6 +93,56 @@ def _circles(gray, diameter=None, region=None):
         consistent |= near & (bins==direction) & (distances>.87*step) & (distances<1.13*step)
     neighbours = np.sum(consistent,axis=1)
     return [c for c,n in zip(group,neighbours) if n >= 2]
+
+
+def _rim_polygon(gray, candidate, margin, neighbour_distance=None, edges=None):
+    """Refine a circular seed to the outer observed elliptical rim.
+
+    Radial sampling excludes interior fly edges. Robust ellipse fitting allows
+    perspective changes; poor support retains the original circular proposal.
+    Growth is bounded by neighbouring centers, not by a fixed tray geometry.
+    """
+    h, w = gray.shape
+    x, y, radius = candidate['x'], candidate['y'], candidate['radius']
+    if edges is None:
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 25, 65)
+    angles = np.linspace(0, 2*np.pi, 120, endpoint=False)
+    points = []
+    for angle in angles:
+        radii = np.linspace(.88*radius, 1.22*radius, max(12, round(radius*.7)))
+        xs = np.rint(x+radii*np.cos(angle)).astype(int)
+        ys = np.rint(y+radii*np.sin(angle)).astype(int)
+        valid = (xs>=0)&(xs<w)&(ys>=0)&(ys<h)
+        hits = np.flatnonzero(valid & (edges[np.clip(ys,0,h-1), np.clip(xs,0,w-1)]>0))
+        if len(hits):
+            r = radii[hits[-1]]
+            points.append([x+r*np.cos(angle), y+r*np.sin(angle)])
+    center, axes, rotation = (x,y), (radius,radius), 0.
+    if len(points) >= 65:
+        data = np.float32(points)
+        fitted = None
+        for _ in range(3):
+            fitted = cv2.fitEllipse(data.reshape(-1,1,2))
+            (cx,cy), (major,minor), degrees = fitted
+            theta = np.deg2rad(degrees)
+            delta = data-[cx,cy]
+            u = delta[:,0]*np.cos(theta)+delta[:,1]*np.sin(theta)
+            v = -delta[:,0]*np.sin(theta)+delta[:,1]*np.cos(theta)
+            residual = np.abs(np.hypot(u/(major/2),v/(minor/2))-1)
+            keep = residual < .08
+            if keep.sum()<60: break
+            data = data[keep]
+        if fitted:
+            (cx,cy),(major,minor),degrees=fitted
+            if np.hypot(cx-x,cy-y)<.15*radius and .85*radius<min(major,minor)/2 and max(major,minor)/2<1.26*radius:
+                center, axes, rotation = (cx,cy), (major/2,minor/2), np.deg2rad(degrees)
+    axes = np.array(axes)*(1+margin/100)
+    if neighbour_distance is not None:
+        axes *= min(1., .49*neighbour_distance/max(axes))
+    a = np.linspace(0,2*np.pi,40,endpoint=False)
+    u,v=axes[0]*np.cos(a),axes[1]*np.sin(a)
+    return [[(center[0]+u0*np.cos(rotation)-v0*np.sin(rotation))/w,
+             (center[1]+u0*np.sin(rotation)+v0*np.cos(rotation))/h] for u0,v0 in zip(u,v)]
 
 
 def _single_well(gray, diameter=None, region=None):
@@ -187,9 +239,14 @@ def _contours(gray, single=False):
     return proposals
 
 
-def detect_wells(content, method='auto', diameter=None, region=None, layout='grid'):
+def detect_wells(content, method='auto', diameter=None, region=None, layout='grid', margin=4):
     if layout not in ('grid', 'individual'):
         raise ValueError('Unknown image layout.')
+    try:
+        margin = float(margin)
+        if not np.isfinite(margin) or not 0 <= margin <= 20: raise ValueError()
+    except (TypeError, ValueError):
+        raise ValueError('Rim margin must be between 0 and 20 percent.') from None
     if region not in (None,''):
         try:
             region=json.loads(region) if isinstance(region,str) else region
@@ -224,9 +281,13 @@ def detect_wells(content, method='auto', diameter=None, region=None, layout='gri
     circles = (_single_well(gray, diameter*scale if diameter else None, region) if layout=='individual' else _circles(gray,diameter*scale if diameter else None,region)) if method!='contours' else []
     wells = []
     if circles:
+        rim_edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 25, 65)
         for c in circles:
-            angles = np.linspace(0,2*np.pi,40,endpoint=False)
-            points = [[(c['x']+c['radius']*np.cos(a))/sw,(c['y']+c['radius']*np.sin(a))/sh] for a in angles]
+            distance = min((np.hypot(c['x']-d['x'],c['y']-d['y']) for d in circles if d is not c), default=None)
+            points = _rim_polygon(gray, c, margin, distance, rim_edges)
+            if region is not None and not all(region[0]<=x<=region[2] and region[1]<=y<=region[3] for x,y in points):
+                # Never silently extend a user-defined detection area.
+                continue
             partial = not is_simple_polygon(points)
             points = clip_polygon(points)
             if not points:
@@ -267,5 +328,5 @@ def detect_wells(content, method='auto', diameter=None, region=None, layout='gri
         rows[-1]['wells'].append(well)
     wells=[well for row in rows for well in sorted(row['wells'],key=lambda well:center(well)[0])]
     return {'wells':wells,'width':w,'height':h,'method':used,
-            'settings':{'method':method,'diameter_px':diameter,'region':region,'layout':layout},
+            'settings':{'method':method,'diameter_px':diameter,'region':region,'layout':layout,'rim_margin_percent':margin},
             'warning':'Review proposals; no fixed layout or well count is assumed. Partially visible rims are clipped to the image edge and flagged; their complete shape remains unknown. Restrict the detection region to exclude mounting hardware when geometry alone is ambiguous; contour mode preserves simple non-circular/concave boundaries.'}

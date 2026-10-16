@@ -18,6 +18,7 @@ import numpy as np
 import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.services.dataset_format import hydrate_manifest
 from backend.services.keras_adapter import (
     KerasAdapter,
     CLASSES,
@@ -51,6 +52,13 @@ class Dataset:
         raw = (self.root / "annotations.json").read_bytes()
         self.sha = digest(raw)
         self.manifest = json.loads(raw)
+        marker = self.manifest.get("completion_marker")
+        if marker is not None:
+            if marker != "dataset-complete.json" or not (self.root / marker).is_file():
+                raise ValueError(
+                    "Incomplete dataset export. Save/extract every part, or export again."
+                )
+        hydrate_manifest(self.manifest)
         if self.manifest.get("role", "train") != role:
             raise ValueError(f"Expected a {role} dataset, not another role.")
         if self.manifest.get("task") != "ccrt":
@@ -80,6 +88,15 @@ class Dataset:
                     "Eligible targets must come from suitable manual annotations."
                 )
             self.annotations[a["id"]] = a
+
+    @property
+    def geometry(self):
+        return {
+            (w["well_uid"], f["frame_index"]): f
+            for w in self.manifest.get("wells", [])
+            for f in w.get("frames", [])
+            if f.get("active", True)
+        }
 
     @lru_cache(maxsize=2)
     def image(self, path):
@@ -224,6 +241,7 @@ def train(
 
 
 def evaluate(adapter, dataset):
+    geometry_by_frame = dataset.geometry
     confusion = {
         truth: {prediction: 0 for prediction in ("coma", "awake", "empty", "unknown")}
         for truth in ("coma", "awake", "empty")
@@ -240,14 +258,7 @@ def evaluate(adapter, dataset):
         frame = image["frame_number"] - 1
         wells = []
         for w in dataset.manifest.get("wells", []):
-            geometry = next(
-                (
-                    f
-                    for f in w["frames"]
-                    if f["frame_index"] == frame and f.get("active", True)
-                ),
-                None,
-            )
+            geometry = geometry_by_frame.get((w["well_uid"], frame))
             if geometry:
                 wells.append(
                     {

@@ -85,6 +85,7 @@ jobs:
           NODE_PATH: ${{ runner.temp }}/flyscope-browser/node_modules
           PYTHON: python
           SUITE_SMOKE_DIR: ${{ runner.temp }}/suite-smoke
+          POSE_SMOKE_MODEL: ${{ runner.temp }}/pose-smoke
           FLYSCOPE_SUITE_MODELS_DIR: ${{ runner.temp }}/suite-smoke/results
           RUN_MODEL_TRAINING: "1"
         run: |
@@ -98,6 +99,7 @@ jobs:
           done
           curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models
           node tests/workflow-browser.cjs
+          node tests/long-sequence-browser.cjs
           node tests/studies-browser.cjs
           node tests/experiments-browser.cjs
           node tests/model-suite-browser.cjs

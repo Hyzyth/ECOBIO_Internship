@@ -173,7 +173,7 @@ for role in ['train','test']:
   assert sum(a['label']=='empty' for a in m['annotations'])==3;assert all(a['label_source'] in ['manual','manual_occupancy'] for a in m['annotations'])
   if role=='test':assert not any(name.startswith('crops/') for name in z.namelist());assert 'project.json' not in z.namelist();assert 'comparison-plan.json' not in z.namelist()
   else:
-   plan=json.loads(z.read('comparison-plan.json'));assert plan['seed']==77;assert plan['runs'][-2]['id']=='poor-poses';assert plan['runs'][-1]['id']=='rich-poses';assert len(plan['runs'])==23
+   plan=json.loads(z.read('comparison-plan.json'));assert plan['seed']==77;assert plan['runs'][-2]['id']=='poor-poses';assert plan['runs'][-1]['id']=='rich-poses';assert len(plan['runs'])==8
    assert len(plan['skipped'])==3
   z.extractall(p/role/'dataset')
 print('Partial grid train/test ZIPs, manual empty targets and fixed well plans passed.')
@@ -231,6 +231,82 @@ print('PASS both model trainers, identical full/poor/rich selections, learned oc
 `,
       ],
       { stdio: "inherit", cwd: path.resolve(__dirname, "..") },
+    );
+  }
+  if (process.env.POSE_SMOKE_MODEL) {
+    const result = path.join(out, "suite-results");
+    execFileSync(
+      python,
+      [
+        path.resolve(__dirname, "../tools/model_suite.py"),
+        "compare",
+        "--train",
+        path.join(out, "train/dataset"),
+        "--test",
+        path.join(out, "test/dataset"),
+        "--output",
+        result,
+        "--runs",
+        "all-annotated-wells",
+        "poor-poses",
+        "rich-poses",
+        "--pose-model",
+        process.env.POSE_SMOKE_MODEL,
+        "--epochs",
+        "1",
+        "--flow-epochs",
+        "1",
+        "--sequence-epochs",
+        "1",
+        "--rf-trees",
+        "5",
+        "--batch-size",
+        "2",
+        "--image-size",
+        "64",
+        "--window",
+        "3",
+        "--initialization",
+        "scratch",
+        "--device",
+        "cpu",
+      ],
+      { stdio: "inherit" },
+    );
+    execFileSync(
+      python,
+      [
+        "-c",
+        `import json
+from pathlib import Path
+p=Path(${JSON.stringify(result)})
+models=list(p.glob('*/*/model.json'));assert len(models)==9
+selections={}
+for file in models:
+ m=json.loads(file.read_text());r=m['selection']['id']
+ if r in selections:assert selections[r]==m['selection']
+ selections[r]=m['selection']
+summary=json.loads((p/'summary.json').read_text());assert len(summary)==9
+assert all(s['scored_annotations']==9 and s['unscored_predictions']==9 for s in summary)
+print('PASS real compact browser exports train all three architectures on identical full/poor/rich selections and score only held-out annotations.')`,
+      ],
+      { stdio: "inherit" },
+    );
+    execFileSync(
+      python,
+      [
+        path.resolve(__dirname, "../tools/model_suite.py"),
+        "evaluate",
+        "--models",
+        result,
+        "--test",
+        path.join(out, "test/dataset"),
+        "--output",
+        path.join(out, "suite-reloaded"),
+        "--device",
+        "cpu",
+      ],
+      { stdio: "inherit" },
     );
   }
   console.log("PASS experiment browser. Artifacts:", out);

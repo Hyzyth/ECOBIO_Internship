@@ -109,7 +109,7 @@ test("random individual budgets exclude Empty but full grid includes it", () => 
     })),
   };
   const plan = P.build(m, { poor_well_id: "W0", rich_well_id: "W1" });
-  assert.equal(plan.runs.length, 40);
+  assert.equal(plan.runs.length, 15);
   assert.equal(plan.runs[0].annotation_ids.length, 26);
   assert.ok(plan.runs.slice(1).every((r) => !r.well_uids.includes("w25")));
   assert.equal(plan.eligible_individual_count, 25);

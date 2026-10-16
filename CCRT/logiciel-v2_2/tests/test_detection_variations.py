@@ -24,6 +24,27 @@ def scene():
 
 
 class DetectionVariations(unittest.TestCase):
+    def test_light_tray_elliptical_rims_weak_well_and_edge_fly(self):
+        image=np.full((1050,1000),185,np.uint8)
+        expected=[]
+        for row in range(7):
+            for col in range(6 if row%2==0 else 5):
+                x,y=180+col*135+(row%2)*67,145+row*125
+                expected.append((x,y))
+                cv2.ellipse(image,(x,y),(42,46),7,0,360,207 if (row,col)==(3,2) else 235,2)
+                cv2.ellipse(image,(x,y),(35,40),7,0,360,200,1)
+                cv2.ellipse(image,(x+29,y),(10,5),0,0,360,55,-1)
+        cv2.rectangle(image,(10,10),(950,70),225,-1)
+        cv2.rectangle(image,(30,100),(100,970),225,-1)
+        for x,y in [(45,45),(955,45),(45,995),(955,995)]:
+            for radius in [29,36,43]: cv2.circle(image,(x,y),radius,235,2)
+        wells=detect_wells(cv2.imencode('.png',image)[1].tobytes())['wells']
+        self.assertEqual(len(wells),len(expected))
+        for x,y in expected:
+            well=min(wells,key=lambda w:np.linalg.norm(np.mean(w['points'],axis=0)*[1000,1050]-[x,y]))
+            polygon=np.float32(well['points'])*[1000,1050]
+            self.assertGreaterEqual(cv2.pointPolygonTest(polygon.astype(np.float32),(x+40,y),False),0)
+
     def test_anisotropic_staggered_spacing_keeps_corner_wells(self):
         image=np.zeros((650,900),np.uint8)
         expected=[]

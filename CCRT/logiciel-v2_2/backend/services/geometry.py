@@ -49,8 +49,22 @@ def clip_polygon(points):
         return []
     if not cv2.isContourConvex(polygon.reshape(-1, 1, 2)):
         return []
-    _, clipped = cv2.intersectConvexConvex(polygon, np.float32([[0,0],[1,0],[1,1],[0,1]]))
-    if clipped is None:
-        return []
-    result = np.clip(clipped[:,0,:], 0, 1).astype(float).tolist()
+    # OpenCV float32 intersection can return FLT_MAX vertices for near-tangent
+    # edges. Clamping those values creates a polygon spanning the whole image.
+    # Sutherland–Hodgman in double precision preserves the actual intersection.
+    result = [[float(x), float(y)] for x, y in points]
+    for axis, edge, sign in [(0,0,1),(0,1,-1),(1,0,1),(1,1,-1)]:
+        output = []
+        for i, a in enumerate(result):
+            b = result[(i+1)%len(result)]
+            inside_a, inside_b = sign*(a[axis]-edge)>=0, sign*(b[axis]-edge)>=0
+            if inside_a:
+                output.append(a)
+            if inside_a != inside_b:
+                t = (edge-a[axis])/(b[axis]-a[axis])
+                crossing = [a[k]+t*(b[k]-a[k]) for k in (0,1)]
+                crossing[axis] = edge
+                output.append(crossing)
+        result = output
+    result = [p for i,p in enumerate(result) if math.dist(p,result[(i+1)%len(result)])>1e-10]
     return result if is_simple_polygon(result) else []

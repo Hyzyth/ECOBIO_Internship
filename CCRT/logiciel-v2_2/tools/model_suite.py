@@ -88,15 +88,7 @@ class TrainingData:
             }
             for d in self.datasets
         }
-        self.geometry = {
-            d.sha: {
-                (w["well_uid"], f["frame_index"]): f
-                for w in d.manifest["wells"]
-                for f in w["frames"]
-                if f.get("active", True)
-            }
-            for d in self.datasets
-        }
+        self.geometry = {d.sha: d.geometry for d in self.datasets}
 
     @staticmethod
     def identity(data, value):
@@ -161,7 +153,7 @@ def plan_for(data, seed=2026, poor=None, rich=None):
         )
 
     run("all-annotated-wells", wells, seed)
-    for count, repeats in [(25, 2), (10, 5), (5, 10), (2, 20)]:
+    for count, repeats in [(25, 1), (10, 2), (5, 4), (2, 5)]:
         if len(occupied) < count:
             skipped.append(
                 {
@@ -190,7 +182,7 @@ def plan_for(data, seed=2026, poor=None, rich=None):
     return {
         "kind": "flyscope-suite-plan",
         "schema_version": 1,
-        "protocol": "full-25x2-10x5-5x10-2x20-poor-rich-v2",
+        "protocol": "full-25x1-10x2-5x4-2x5-poor-rich-v3",
         "seed": seed,
         "dataset_sha256": [d.sha for d in data.datasets],
         "runs": runs,
@@ -618,20 +610,14 @@ def evaluate_model(path, test, device="auto"):
         for a in test.annotations.values()
         if a["eligible_for_training"]
     }
+    geometry_by_frame = test.geometry
     output = []
     try:
         for image in sorted(test.manifest["images"], key=lambda im: im["frame_number"]):
             frame = image.get("frame_index", image["frame_number"] - 1)
             wells = []
             for w in test.manifest["wells"]:
-                g = next(
-                    (
-                        g
-                        for g in w["frames"]
-                        if g["frame_index"] == frame and g.get("active", True)
-                    ),
-                    None,
-                )
+                g = geometry_by_frame.get((w["well_uid"], frame))
                 if g:
                     wells.append(
                         {

@@ -337,14 +337,22 @@ th {
 }
 .spark {
   display: flex;
-  gap: 1px;
-  max-width: 240px;
+  width: 240px;
+  height: 15px;
   overflow: hidden;
+  background: #7b8792;
 }
 .spark span {
   height: 15px;
-  min-width: 2px;
-  flex: 1;
+  min-width: 0;
+  flex-basis: 0;
+  flex-shrink: 1;
+}
+#datasetDownloads a {
+  display: block;
+  margin: 10px 0;
+  overflow-wrap: anywhere;
+  color: #82e5cd;
 }
 #frameList {
   max-height: 220px;

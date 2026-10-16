@@ -83,6 +83,78 @@
   function geometry(well, frame) {
     return well.overrides?.[frame] || well.points;
   }
+  // Runs retain every transition while using one DOM element per state change.
+  function stateRuns(project, well) {
+    const runs = [];
+    for (let i = analysisStart(project); i < project.frames.length; i++) {
+      const state = activeWell(well, i)
+        ? effective(project.records[key(i, well.uid)], well)
+        : "unknown";
+      const last = runs.at(-1);
+      if (last?.state === state) last.end = i;
+      else runs.push({ state, start: i, end: i });
+    }
+    return runs;
+  }
+  function projectBackup(project) {
+    // Derived per-frame results repeat the same geometry thousands of times.
+    // All editable information lives in wells, records, frames and history.
+    const { results, summary, ...saved } = project;
+    return {
+      ...saved,
+      schema_version: 1,
+      task: taskOf(project),
+      exported_at: new Date().toISOString(),
+    };
+  }
+  function resizeBoundary(points, factor) {
+    if (!Number.isFinite(factor) || factor < 0.8 || factor > 1.2)
+      throw Error("Choose a size adjustment from −20% to +20%.");
+    const xs = points.map((p) => p[0]),
+      ys = points.map((p) => p[1]),
+      cx = (Math.min(...xs) + Math.max(...xs)) / 2,
+      cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    let polygon = points.map(([x, y]) => [
+      cx + (x - cx) * factor,
+      cy + (y - cy) * factor,
+    ]);
+    const partial = polygon.some(([x, y]) => x < 0 || x > 1 || y < 0 || y > 1);
+    // Clip to the image rectangle, preserving vertex order.
+    for (const [axis, edge, sign] of [
+      [0, 0, 1],
+      [0, 1, -1],
+      [1, 0, 1],
+      [1, 1, -1],
+    ]) {
+      const output = [];
+      for (let i = 0; i < polygon.length; i++) {
+        const a = polygon[i],
+          b = polygon[(i + 1) % polygon.length],
+          insideA = sign * (a[axis] - edge) >= 0,
+          insideB = sign * (b[axis] - edge) >= 0;
+        if (insideA) output.push(a);
+        if (insideA !== insideB) {
+          const t = (edge - a[axis]) / (b[axis] - a[axis]);
+          const crossing = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+          crossing[axis] = edge;
+          output.push(crossing);
+        }
+      }
+      polygon = output;
+    }
+    polygon = polygon.filter(
+      (p, i) =>
+        Math.hypot(
+          p[0] - polygon[(i + 1) % polygon.length][0],
+          p[1] - polygon[(i + 1) % polygon.length][1],
+        ) > 1e-10,
+    );
+    if (!isSimplePolygon(polygon))
+      throw Error(
+        "Resizing would create an invalid boundary. Edit that well manually.",
+      );
+    return { points: polygon, partial };
+  }
   function effective(record, well) {
     if (well?.occupancy === "empty") return "empty";
     if (well?.occupancy === "multiple") return "invalid";
@@ -750,9 +822,12 @@
       ...rows.map((row) => fields.map((f) => escape(row[f])).join(",")),
     ].join("\r\n");
   }
-  function trainingAnnotations(project) {
+  function trainingAnnotations(project, { compact = false } = {}) {
     const task = taskOf(project),
-      annotations = [];
+      annotations = [],
+      reviews = new Map(
+        project.wells.map((w) => [w.uid, new Set(w.review_frames || [])]),
+      );
     project.frames.forEach((frame, i) =>
       project.wells.forEach((w) => {
         if (i < analysisStart(project)) return;
@@ -764,11 +839,58 @@
             : w.occupancy === "empty" || !!correction?.state;
         if (!manual) return;
         const partial = w.partial_frames?.[i] ?? !!w.detection.partial,
-          reviewed = !boundaryNeedsReview(w, i);
+          reviewed = !w.detection.review_required && !reviews.get(w.uid).has(i);
         const uncertain =
           task === "ccrt" &&
           w.occupancy !== "empty" &&
           correction?.state === "unknown";
+        const target = {
+          id: `f${i + 1}-${w.uid}`,
+          frame_index: i,
+          well_uid: w.uid,
+          label:
+            task === "eggs"
+              ? correction.egg_count
+              : w.occupancy === "empty"
+                ? "empty"
+                : correction.state,
+          label_source:
+            task === "ccrt" && w.occupancy === "empty"
+              ? "manual_occupancy"
+              : "manual",
+          boundary_reviewed: reviewed,
+          boundary_partial: partial,
+          occupancy: w.occupancy || "unknown",
+          eligible_for_training:
+            reviewed &&
+            !uncertain &&
+            !partial &&
+            !(task === "ccrt" && !["single", "empty"].includes(w.occupancy)),
+          state_training_eligible:
+            task === "ccrt" &&
+            reviewed &&
+            !uncertain &&
+            !partial &&
+            w.occupancy === "single",
+        };
+        if (compact) {
+          if (task === "eggs") {
+            target.annotation_unit = imageArea(w) ? "image" : "region";
+            target.annotation_type = "count";
+          }
+          target.annotation = correction || {};
+          if (!target.eligible_for_training)
+            target.exclusion_reasons = [
+              !reviewed ? "boundary_unreviewed" : null,
+              uncertain ? "uncertain_state" : null,
+              partial ? "partial_boundary" : null,
+              task === "ccrt" && !["single", "empty"].includes(w.occupancy)
+                ? "occupancy_not_confirmed_single_or_empty"
+                : null,
+            ].filter(Boolean);
+          annotations.push(target);
+          return;
+        }
         annotations.push({
           id: `f${i + 1}-${w.uid}`,
           frame_index: i,
@@ -971,7 +1093,7 @@
       imported,
       source_exported_at: report.exported_at,
     });
-    validateProject(exportProject(copy), copy.frames);
+    validateProject(projectBackup(copy), copy.frames);
     return { project: copy, imported };
   }
 
@@ -1268,6 +1390,9 @@
   }
 
   const api = {
+    resizeBoundary,
+    stateRuns,
+    projectBackup,
     analysisStart,
     analysisIndices,
     frameTiming,

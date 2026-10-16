@@ -98,8 +98,8 @@ Select one image or independent images on the Egg counting page. Whole-image cou
 | Project backup JSON | Resume editable geometry, labels, predictions and history; select the same original images before importing |
 | Human report ZIP | Read/share compact HTML/CSV, occupancy, recovery frame IDs, optional CCRT, maps and project backup |
 | Machine analysis ZIP | Frame-level states/geometry, raw probabilities, model versions, corrections and timing; no source pixels |
-| Training dataset ZIP | Original analysis-window images, human targets, geometry, hashes, inspection crops and comparison plan |
-| Dataset ZIP with **Export as test set** checked | Held-out images/targets/geometry; omits duplicate crops, plans and editable history |
+| Training dataset ZIP | Original analysis-window images, manual targets, shared boundaries, hashes and comparison plan |
+| Dataset ZIP with **Export as test set** checked | Held-out images/targets/geometry; omits plans and editable history |
 
 Save one train ZIP and one or more **independent physical grids** as test ZIPs. Partial annotation is valid for either role. All analysis-window images remain available for temporal context; only eligible manual annotations enter losses. A test ZIP is not an editable backup.
 
@@ -140,6 +140,20 @@ python tools/sleap_pose.py train --labels /path/to/overhead-labels.slp \
 
 Parent hash and skeleton must match. If you trained `pose-overhead`, use that directory instead of `pose-base` in the comparison commands below. Use the same pose parent across CCRT selections. Model B trains state and occupancy forests separately per selected CCRT subset; the external pose parent stays fixed, preserving the CCRT annotation budgets.
 
+### Large experiments and exported files
+
+For thousands of frames, use **Save dataset to folder (large experiments)** in Chrome/Chromium or Edge. Choose a parent folder; the app creates a new `flyscope-ccrt-…` (or `flyscope-eggs-…`) subfolder and writes originals one at a time. Wait for **Dataset saved in …**. `dataset-complete.json` is written last; a cancelled/failed export folder must be exported again. Your app annotations are retained. Keep the source images until you have verified the saved dataset.
+
+**Export training/test dataset ZIP** works in other browsers too. Large datasets are automatically divided into independent ZIP files around 256 MiB each, avoiding the old 4 GB / 65,535-file limit. Download links remain on the page until the next dataset export or navigation/reload. Download **every part**, then extract all parts into the **same empty directory**. These are ordinary ZIPs, not a multipart `.z01` archive. ZIP downloading does not create a folder automatically; check the browser's Downloads list if it starts automatically. Use the visible link if it does not. Very large individual metadata files need direct folder saving.
+
+There are no pre-generated per-well PNG crops. `images/` contains one original for every analysis frame, including unlabeled context required by temporal models. Schema 3 `annotations.json` stores manual targets plus shared normalized boundaries and sparse frame overrides. `backend/services/dataset_format.py` resolves these references for all three architectures and the original CNN trainers; old dataset exports still work. The included `dataset.py` and `dataset_format.py` provide lazy masked RGB crops for other trainers. You can check a training export before starting:
+
+```bash
+python "$DATA_DIR/train-grid/dataset.py" "$DATA_DIR/train-grid"
+```
+
+`project.json` remains an editable backup with geometry, model outputs, manual corrections and history; derived results are omitted to avoid repeating boundaries for every frame. Select the original images in the app and import this JSON to continue editing. Human reports also include this compact backup. Test exports omit the backup and training loaders: save a project separately if needed. Models and plans still use the original image hashes, manual-only targets, exclusion flags and stable Well IDs.
+
 ## 6. Create the shared training plan
 
 Set the seed and poor/rich-pose **Well IDs** in the app's training-export comparison options. `comparison-plan.json` saves actual well/annotation IDs and seeds. No special pose-diversity notes are needed.
@@ -147,14 +161,16 @@ Set the seed and poor/rich-pose **Well IDs** in the app's training-export compar
 | Selection | Runs |
 | --- | ---: |
 | All eligible annotated wells, including Empty | 1 |
-| 25 random single individuals | 2 |
-| 10 random single individuals | 5 |
-| 5 random single individuals | 10 |
-| 2 random single individuals | 20 |
+| 25 random single individuals | 1 |
+| 10 random single individuals | 2 |
+| 5 random single individuals | 4 |
+| 2 random single individuals | 5 |
 | One selected poor-pose individual | 1 |
 | One selected rich-pose individual | 1 |
 
-That is **40 runs per architecture** when enough eligible individuals and both IDs exist. Oversized budgets are explicitly skipped; poor/rich runs are omitted if unspecified. Empty wells never enter random individual budgets. Repeated subsets can overlap; all eligible labels of a selected well are retained. Every architecture uses the **same saved selections and seeds**.
+Newly generated plans use this smaller protocol. Existing saved plans retain their original selections unless you explicitly generate and use a new plan.
+
+That is **15 runs per architecture** when enough eligible individuals and both IDs exist. Oversized budgets are explicitly skipped; poor/rich runs are omitted if unspecified. Empty wells never enter random individual budgets. Repeated subsets can overlap; all eligible labels of a selected well are retained. Every architecture uses the **same saved selections and seeds**.
 
 If needed, generate a plan explicitly (also supports several `--train` directories):
 
