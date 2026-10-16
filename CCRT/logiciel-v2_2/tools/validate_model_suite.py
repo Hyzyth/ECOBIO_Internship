@@ -5,6 +5,7 @@ This validates software, not biological accuracy. Supply the separately trained
 SLEAP pose smoke model. All generated files remain outside the repository.
 """
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,12 @@ main(
         "--rf-trees",
         "5",
         "--batch-size",
+        "4",
+        "--resnet-batch-size",
+        "2",
+        "--pose-batch-size",
+        "16",
+        "--temporal-batch-size",
         "2",
         "--image-size",
         "64",
@@ -71,8 +78,31 @@ for path in manifests:
         assert selections[run] == m["selection"]
     selections[run] = m["selection"]
     assert not m["training"]["test_data_used_for_training"]
+    assert m["training"]["batch_size"] == (16 if m["architecture"] == "sleap-rf" else 2)
 assert len(selections["all-annotated-wells"]["annotation_ids"]) == 18
 assert len(selections["poor-poses"]["annotation_ids"]) == 6
+with (out / "results/training.csv").open() as stream:
+    training_rows = list(csv.DictReader(stream))
+epoch_rows = [row for row in training_rows if row["event"] == "epoch"]
+assert len(epoch_rows) == 12  # 3 appearance + 3 * (flow, two-stream, TGM)
+assert len([row for row in training_rows if row["event"] == "batch"]) == 60
+assert (out / "results/loss.png").stat().st_size > 1000
+for path in manifests:
+    model = json.loads(path.read_text())
+    for phase, history in model["training"]["loss"].items():
+        logged = [
+            float(row["loss"])
+            for row in epoch_rows
+            if row["architecture"] == model["architecture"]
+            and row["run"] == model["selection"]["id"]
+            and row["phase"] == phase
+        ]
+        assert logged == history
+events = [
+    json.loads(row) for row in (out / "results/progress.jsonl").read_text().splitlines()
+]
+assert events[-1]["event"] == "complete"
+assert len([row for row in events if row["event"] == "model_saved"]) == 9
 summary = json.loads((out / "results/summary.json").read_text())
 assert len(summary) == 9
 assert all(
@@ -91,7 +121,68 @@ main(
         "cpu",
     ]
 )
+# Changing input delivery must not change learned targets, shuffle order or
+# pixel values. Verify the optimized path against the uncached CPU path.
+main(
+    [
+        "compare",
+        "--train",
+        str(train),
+        "--test",
+        str(test),
+        "--plan",
+        str(out / "plan.json"),
+        "--architectures",
+        "resnet18",
+        "--runs",
+        "poor-poses",
+        "--epochs",
+        "1",
+        "--batch-size",
+        "2",
+        "--image-size",
+        "64",
+        "--initialization",
+        "scratch",
+        "--device",
+        "cpu",
+        "--no-cache",
+        "--prefetch-batches",
+        "0",
+        "--output",
+        str(out / "uncached"),
+    ]
+)
+import torch
+
+cached = torch.load(
+    out / "results/resnet18/poor-poses/model.pt", map_location="cpu", weights_only=True
+)
+uncached = torch.load(
+    out / "uncached/resnet18/poor-poses/model.pt", map_location="cpu", weights_only=True
+)
+assert all(torch.equal(cached[key], uncached[key]) for key in cached)
+# Observe native forward batches, not just the outer extraction batch metadata.
+import numpy as np
+from backend.services.suite_models import PoseWorker
+from tools.sleap_pose import MODEL_CACHE
+
+worker = PoseWorker(args.pose_model, device="cpu")
+rgb = np.full((64, 64, 3), 128, dtype=np.uint8)
+worker.predict([rgb], ["warmup"])
+native = next(iter(MODEL_CACHE.values()))
+observed = []
+hook = native.register_forward_pre_hook(
+    lambda module, inputs: observed.append(len(inputs[0]))
+)
+try:
+    poses = worker.predict([rgb] * 18, [str(i) for i in range(18)], batch_size=16)
+    assert observed == [16, 2]
+    assert [pose["id"] for pose in poses] == [str(i) for i in range(18)]
+finally:
+    hook.remove()
+    worker.close()
 print(
-    "PASS actual ResNet, SLEAP/RF and DeepEthogram flow/two-stream/TGM training; identical full/poor/rich selections, partial labels, independent evaluation and all nine checkpoint reloads:",
+    "PASS actual ResNet, SLEAP/RF and DeepEthogram flow/two-stream/TGM training; live losses/plots, batch overrides, identical cached/uncached weights, full/poor/rich selections, partial labels, independent evaluation and all nine checkpoint reloads:",
     out,
 )

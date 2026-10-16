@@ -61,7 +61,7 @@ The check reports GPU name, compute capability, compiled architectures, VRAM, To
 
 Use a current NVIDIA driver supporting your exact card. CUDA 12.8's Linux toolkit driver baseline is 570.26; a specific RTX PRO model can need a newer driver. The CUDA version displayed by `nvidia-smi` is the driver's supported version, not the runtime installed in Python. A newer driver reporting CUDA 13 can run this CUDA 12.8 stack.
 
-For 12 GB, start with **batch size 4, image size 128, temporal window 5**, running training jobs sequentially. If memory runs out, reduce batch size to 2 or 1 and use a new output directory. The random forest trains on CPU; pose training/inference and the neural classifiers can use CUDA. Playback FPS and acquisition interval are independent of batch size.
+For 12 GB, **image size 128 and temporal window 5** are conservative starting points. The default batch size 4 prioritizes fitting every architecture. Try `--resnet-batch-size 32 --pose-batch-size 16 --temporal-batch-size 8` for more work per GPU call, then measure throughput and memory on your machine. These are starting values, not GPU-validated limits. If memory runs out, reduce the relevant override and use a new output directory. Run training jobs sequentially. The random forest trains on CPU; pose inference and the neural classifiers can use CUDA. Playback FPS and acquisition interval are independent of batch size.
 
 The cloud validation machine has no NVIDIA GPU. Training/inference was tested on CPU using the CUDA-capable wheel, and the Blackwell kernels are present; physical GPU execution must be checked on your workstation. Some CUDA flow-backward kernels are nondeterministic. Saved data selections and seeds are identical across models; bit-for-bit GPU training reproducibility is not promised.
 
@@ -189,11 +189,11 @@ Replace those IDs with your choices. If names are ambiguous across grids, use `m
 
 Approaches are `resnet18` (appearance), `sleap-rf` (anatomy plus separate occupancy forest), and `deepethogram` (optical flow, two-stream visual features and TGM sequence classification).
 
-Start with three selections before launching the full 120-run suite:
+Start with three selections: **9 training runs** across the three approaches. The current full protocol is **45 runs** (15 selections × 3 approaches), not 120. An older saved plan can still contain 40 selections/120 runs; existing immutable plans are preserved. Check its `runs` list or the printed `suite_start.training_runs` before committing to a long job.
 
 ```bash
 python tools/model_suite.py compare \
-  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/shared-plan.json" \
+  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/train-grid/comparison-plan.json" \
   --test "$DATA_DIR/test-grid-1" --pose-model "$DATA_DIR/pose-base" \
   --runs all-annotated-wells poor-poses rich-poses \
   --epochs 5 --flow-epochs 3 --sequence-epochs 5 \
@@ -202,7 +202,51 @@ python tools/model_suite.py compare \
   --device cuda --output "$DATA_DIR/comparison-pilot"
 ```
 
-Omit `--plan` to use a single grid's exported plan automatically. Remove `--runs` and choose a new output directory for all available selections. Use `--architectures resnet18 sleap-rf` for independent images, or choose any one approach. Model B is the only approach needing `--pose-model`.
+For the **full training suite**, run this command without a `--runs` filter, using the same saved plan and a fresh output directory:
+
+```bash
+python tools/model_suite.py compare \
+  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/train-grid/comparison-plan.json" \
+  --test "$DATA_DIR/test-grid-1" --pose-model "$DATA_DIR/pose-base" \
+  --epochs 5 --flow-epochs 3 --sequence-epochs 5 \
+  --batch-size 4 --resnet-batch-size 32 --pose-batch-size 16 --temporal-batch-size 8 \
+  --image-size 128 --window 5 \
+  --confidence-threshold 0.8 --awake-frames 3 --false-awake-cost 2 \
+  --device cuda --output "$DATA_DIR/comparison-full"
+```
+
+This expands the selections, not the training duration per selection. The epoch values are examples, not established convergence settings. Choose epochs and batch sizes on training/validation data, then keep them fixed across the matched runs. Changing batch size changes optimization, so use the same chosen overrides for both pilot and full comparisons when comparing their scores. If you generated `shared-plan.json` in step 6, substitute that path. Omit `--plan` to use a single grid's exported plan automatically. Use `--architectures resnet18 sleap-rf` for independent images, or choose any one approach. Model B is the only approach needing `--pose-model`.
+
+### Live progress, loss logs and GPU throughput
+
+Progress starts with dataset loading and image-hash verification, then shows cache preparation, architecture/selection, phase, epoch, batch counts, loss, samples/second and an epoch ETA. Messages print about every **5 seconds** (`--log-every 2` makes them more frequent), at phase/epoch boundaries, and after the first batch. A single slow operation can exceed that interval; it is not a background heartbeat. Random-forest fitting uses CPU and reports its start/completion rather than neural-network epochs.
+
+After dataset/plan validation, the output directory contains:
+
+| File | Contents |
+| --- | --- |
+| `progress.jsonl` | Incrementally flushed progress events, selected settings, device/GPU, artifact paths and failure/interruption reasons. |
+| `training.csv` | Every neural batch loss plus epoch means, architecture/selection/phase, counts, throughput, input wait and allocated/reserved GPU MiB. Buffered rows flush at progress messages and epoch completion. |
+| `loss.png` | Training-loss curves, refreshed after each completed epoch, with separate panels for appearance, optical flow, two-stream and TGM losses. |
+
+`elapsed_s` and `input_wait_s` in training rows describe the current epoch; ETA estimates its remaining time. Input wait measures time waiting for prepared CPU batches. CUDA work is asynchronous, so these are throughput diagnostics, not a GPU kernel profiler. Phase losses have different meanings/scales. There is no SLEAP/RF gradient-loss curve: its forests are fitted on fixed pose features. These logs **do not use held-out test data as validation loss**.
+
+In a second terminal, inspect progress or regenerate an exportable plot:
+
+```bash
+tail -f "$DATA_DIR/comparison-full/progress.jsonl"
+python tools/plot_training.py \
+  --input "$DATA_DIR/comparison-full/training.csv" \
+  --output "$DATA_DIR/comparison-full/training-loss.svg"
+```
+
+The plot command needs at least one completed epoch; batch losses are readable in the CSV immediately. To also retain messages from initial verification and full Python tracebacks on Linux, use `set -o pipefail` and append `2>&1 | tee "$DATA_DIR/comparison-full-console.log"` to the compare command. The Python progress records themselves flush without requiring `python -u`.
+
+The old trainer repeatedly decoded full-grid images for randomly ordered single-well crops and only printed at epoch completion. A long silence after the ImageNet download did not establish that it was stuck. The new default prepares a **reusable, memory-mapped uint8 crop cache**, decoding each required source frame once, then reading the same masked crops across epochs and selections. Only selected training wells and their causal context enter this cache; tests never fit it. Hash verification still runs on every command. Preparation is CPU/disk work, so low GPU usage during that phase is expected.
+
+The cache defaults to `$DATA_DIR/.flyscope-training-cache` when output is directly inside `$DATA_DIR`. Put `--cache-dir /path/on/local-ssd/flyscope-crops` on **both** commands to relocate/reuse it. At 128×128 RGB, 5,400 frames × 61 wells need about **15.1 GiB** plus small occupancy features/headers. Preparation prints its actual size estimate and checks free disk space. Temporary DeepEthogram feature files need another ~1.3 GiB for that many frame/well pairs and are removed after each temporal run. Completed caches can be deleted between commands; original exports and annotations are not changed. `--no-cache` disables disk caching if storage is constrained, at the cost of slower epochs. A cancelled cache build is rebuilt; completed model checkpoints and logs remain in their output directories. There is no optimizer/partial-epoch resume: rerun with a new output directory, or evaluate completed `model.json` checkpoints separately.
+
+Bounded CPU prefetch overlaps input preparation with training (`--prefetch-batches 2`, `0` to disable), with pinned uint8 CUDA transfers for ResNet/DeepEthogram training. `--cache-workers 2` controls initial frame preparation, not model training. Keep the cache on a local SSD when possible. Temporal feature extraction is batched and fixed features remain on disk rather than accumulating in GPU memory. GPU memory usage is not a utilization target: a small ResNet with batch size 4 can legitimately occupy much less than 12 GB. Increase batch size gradually while comparing samples/second; SLEAP/RF fitting, image verification and cache preparation will still have low GPU utilization. Restart with the updated code to obtain these features; an already running process cannot acquire new logging or caching.
 
 Defaults fine-tune ImageNet backbones; `--initialization scratch` starts fresh weights. Each run restarts independently from the common base, never the preceding subset's CCRT weights. The temporal model uses current/past analysis frames from selected individuals; no setup/future frames or unselected wells enter targets. Missing interior context/geometry is an explicit error.
 

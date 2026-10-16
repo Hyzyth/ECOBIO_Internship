@@ -5,3 +5,4 @@ __pycache__/
 # Generated experiments and fine-tuned artifacts belong outside source control.
 experiments/
 trained-models/
+.flyscope-training-cache/

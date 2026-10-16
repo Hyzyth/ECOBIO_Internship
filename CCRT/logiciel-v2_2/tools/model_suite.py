@@ -48,11 +48,19 @@ from backend.services.suite_models import (
     model_version,
 )
 import numpy as np
+from tools.training_support import (
+    CropCache,
+    Progress,
+    prefetched,
+    host_tensor,
+    device_tensor,
+)
 
 
 class TrainingData:
-    def __init__(self, roots):
-        self.datasets = [Dataset(root, "train") for root in roots]
+    def __init__(self, roots, progress=None):
+        self.datasets = [Dataset(root, "train", progress) for root in roots]
+        self.cache = None
         if len({d.sha for d in self.datasets}) != len(self.datasets):
             raise ValueError("Duplicate training datasets.")
         if len({d.manifest["experiment_id"] for d in self.datasets}) != len(
@@ -96,7 +104,14 @@ class TrainingData:
 
     @lru_cache(maxsize=256)
     def rgb(self, sha, frame, well, size):
+        if self.cache is not None:
+            return self.cache.get(sha, frame, well, size)
         data = next(d for d in self.datasets if d.sha == sha)
+        geometry = self.context_geometry(sha, frame, well)
+        im = data.image(self.image_maps[sha][frame]["path"])
+        return crop_rgb(im, geometry["points"], size)
+
+    def context_geometry(self, sha, frame, well):
         if frame not in self.image_maps[sha]:
             raise ValueError(
                 "Temporal context image is missing. Re-export the complete analysis window."
@@ -108,8 +123,7 @@ class TrainingData:
             raise ValueError(
                 "A temporal context boundary needs review. Approve stable boundaries or correct alignment before training."
             )
-        im = data.image(self.image_maps[sha][frame]["path"])
-        return crop_rgb(im, geometry["points"], size)
+        return geometry
 
     def sample(self, identity, size):
         data, a = self.annotations[identity]
@@ -254,6 +268,28 @@ def train_model(kind, data, run, out, args):
     import torch
 
     device = torch_setup(run["seed"], args.device)
+    progress = args.progress
+    batch_size = (
+        getattr(
+            args,
+            {
+                "resnet18": "resnet_batch_size",
+                "sleap-rf": "pose_batch_size",
+                "deepethogram": "temporal_batch_size",
+            }[kind],
+        )
+        or args.batch_size
+    )
+    context = {"architecture": kind, "run": run["id"]}
+    progress.emit(
+        "model_start",
+        force=True,
+        **context,
+        device=str(device),
+        samples=len(run["annotation_ids"]),
+        batch_size=batch_size,
+        gpu=torch.cuda.get_device_name(device) if device.type == "cuda" else None,
+    )
     ids = run["annotation_ids"]
     labels = [target(data, k) for k in ids]
     start = time.monotonic()
@@ -270,13 +306,46 @@ def train_model(kind, data, run, out, args):
         worker = PoseWorker(pose_source, device=args.device)
         features = []
         try:
-            for offset in range(0, len(ids), args.batch_size):
-                batch = ids[offset : offset + args.batch_size]
+            batches = (
+                ids[offset : offset + batch_size]
+                for offset in range(0, len(ids), batch_size)
+            )
+
+            def prepare_pose(batch):
                 crops = [data.sample(k, args.image_size) for k in batch]
-                poses = worker.predict([pose_input(c[0]) for c in crops], batch)
+                return crops, [pose_input(c[0]) for c in crops]
+
+            progress.emit(
+                "phase_start",
+                force=True,
+                **context,
+                phase="pose_features",
+                samples=len(ids),
+            )
+            completed = 0
+            for batch, (crops, images) in prefetched(
+                batches, prepare_pose, args.prefetch_batches
+            ):
+                poses = worker.predict(images, batch, batch_size=batch_size)
                 features.extend(pose_features(p, c[1]) for p, c in zip(poses, crops))
+                completed += len(batch)
+                progress.emit(
+                    "pose_features",
+                    **context,
+                    phase="pose_features",
+                    samples=completed,
+                    total_samples=len(ids),
+                )
         finally:
             worker.close()
+        progress.emit(
+            "phase_start",
+            force=True,
+            **context,
+            phase="random_forests",
+            device="cpu",
+            trees=args.rf_trees,
+        )
         forest = RandomForestClassifier(
             n_estimators=args.rf_trees,
             random_state=run["seed"],
@@ -318,38 +387,98 @@ def train_model(kind, data, run, out, args):
         )
         criterion = torch.nn.CrossEntropyLoss(weight=weights)
 
-        def optimize(phase, parameters, epochs, batch_loss):
+        def optimize(phase, parameters, epochs, batch_loss, prepare):
             optimizer = torch.optim.Adam(parameters, lr=args.learning_rate)
             history = []
+            progress.emit(
+                "phase_start",
+                force=True,
+                **context,
+                phase=phase,
+                epochs=epochs,
+                batch_size=batch_size,
+            )
             for epoch in range(epochs):
                 order = np.random.default_rng(run["seed"] + epoch).permutation(len(ids))
                 values = []
                 network.train()
                 frozen_batch_norm(network)
-                for offset in range(0, len(order), args.batch_size):
-                    batch = [ids[i] for i in order[offset : offset + args.batch_size]]
-                    optimizer.zero_grad(set_to_none=True)
-                    loss = batch_loss(batch)
-                    if not np.isfinite(float(loss.detach())):
-                        raise RuntimeError(
-                            "Nonfinite training loss; no artifact saved."
-                        )
-                    loss.backward()
-                    optimizer.step()
-                    values.append(float(loss.detach()))
-                history.append(float(np.mean(values)))
-                print(
-                    json.dumps(
-                        {
-                            "architecture": kind,
-                            "run": run["id"],
-                            "phase": phase,
-                            "epoch": epoch + 1,
-                            "loss": history[-1],
-                        }
-                    ),
-                    flush=True,
+                batches = (
+                    [ids[i] for i in order[offset : offset + batch_size]]
+                    for offset in range(0, len(order), batch_size)
                 )
+                iterator = iter(prefetched(batches, prepare, args.prefetch_batches))
+                epoch_start = time.monotonic()
+                input_wait = 0
+                completed = 0
+                total_batches = (len(ids) + batch_size - 1) // batch_size
+                progress.emit(
+                    "epoch_start",
+                    force=True,
+                    **context,
+                    phase=phase,
+                    epoch=epoch + 1,
+                    epochs=epochs,
+                    batches=total_batches,
+                )
+                try:
+                    for index in range(total_batches):
+                        waiting = time.monotonic()
+                        batch, inputs = next(iterator)
+                        input_wait += time.monotonic() - waiting
+                        optimizer.zero_grad(set_to_none=True)
+                        loss = batch_loss(batch, inputs)
+                        scalar = float(loss.detach())
+                        if not np.isfinite(scalar):
+                            raise RuntimeError(
+                                "Nonfinite training loss; no artifact saved."
+                            )
+                        loss.backward()
+                        optimizer.step()
+                        values.append(scalar)
+                        completed += len(batch)
+                        elapsed = time.monotonic() - epoch_start
+                        gpu = (
+                            {
+                                "gpu_allocated_mib": torch.cuda.memory_allocated(device)
+                                / 1024**2,
+                                "gpu_reserved_mib": torch.cuda.memory_reserved(device)
+                                / 1024**2,
+                            }
+                            if device.type == "cuda"
+                            else {}
+                        )
+                        progress.batch(
+                            **context,
+                            phase=phase,
+                            epoch=epoch + 1,
+                            epochs=epochs,
+                            batch=index + 1,
+                            batches=total_batches,
+                            samples=completed,
+                            total_samples=len(ids),
+                            loss=scalar,
+                            elapsed_s=elapsed,
+                            samples_per_s=completed / max(elapsed, 1e-9),
+                            input_wait_s=input_wait,
+                            eta_s=(len(ids) - completed) * elapsed / completed,
+                            **gpu,
+                        )
+                finally:
+                    iterator.close()
+                history.append(float(np.mean(values)))
+                progress.epoch(
+                    **context,
+                    phase=phase,
+                    epoch=epoch + 1,
+                    epochs=epochs,
+                    loss=history[-1],
+                    elapsed_s=time.monotonic() - epoch_start,
+                    samples=len(ids),
+                    samples_per_s=len(ids) / max(time.monotonic() - epoch_start, 1e-9),
+                    input_wait_s=input_wait,
+                )
+                progress.plot()
             losses[phase] = history
 
         def targets(batch):
@@ -360,16 +489,13 @@ def train_model(kind, data, run, out, args):
                 "appearance",
                 network.parameters(),
                 args.epochs,
-                lambda batch: criterion(
-                    network(
-                        normalize(
-                            tensor(
-                                [data.sample(k, args.image_size)[0] for k in batch],
-                                device,
-                            )
-                        )
-                    ),
+                lambda batch, inputs: criterion(
+                    network(normalize(device_tensor(inputs, device))),
                     targets(batch),
+                ),
+                lambda batch: host_tensor(
+                    [data.sample(k, args.image_size)[0] for k in batch],
+                    device.type == "cuda",
                 ),
             )
         else:
@@ -381,21 +507,27 @@ def train_model(kind, data, run, out, args):
                     "DeepEthogram training requires ordered multi-frame sequences."
                 )
 
-            def clips(batch):
-                return tensor(
+            def prepare_clips(batch):
+                return host_tensor(
                     [
                         im
                         for k in batch
                         for im in data.clip(k, args.image_size, args.window)
                     ],
-                    device,
-                ).reshape(len(batch), args.window, 3, args.image_size, args.image_size)
+                    device.type == "cuda",
+                )
+
+            def clips(batch, inputs):
+                return device_tensor(inputs, device).reshape(
+                    len(batch), args.window, 3, args.image_size, args.image_size
+                )
 
             optimize(
                 "optical_flow",
                 network.motion.parameters(),
                 args.flow_epochs,
-                lambda batch: flow_loss(network, clips(batch)),
+                lambda batch, inputs: flow_loss(network, clips(batch, inputs)),
+                prepare_clips,
             )
             network.motion.eval()
             for p in network.motion.parameters():
@@ -408,70 +540,126 @@ def train_model(kind, data, run, out, args):
                     if not n.startswith(("motion.", "temporal."))
                 ],
                 args.epochs,
-                lambda batch: criterion(
-                    network.features(clips(batch))[1], targets(batch)
+                lambda batch, inputs: criterion(
+                    network.features(clips(batch, inputs))[1], targets(batch)
                 ),
+                prepare_clips,
             )
             network.eval()
-            feature_cache = {}
 
-            def features_at(identity, frame):
+            def history_keys(identity):
                 d, a = data.annotations[identity]
-                k = (d.sha, a["well_uid"], frame)
-                if k not in feature_cache:
-                    start_frame = d.manifest.get(
-                        "analysis_start_index", min(data.image_maps[d.sha])
+                start_frame = d.manifest.get(
+                    "analysis_start_index", min(data.image_maps[d.sha])
+                )
+                return [
+                    (
+                        d.sha,
+                        max(start_frame, a["frame_index"] - args.window + 1 + i),
+                        a["well_uid"],
                     )
-                    history = [
+                    for i in range(args.window)
+                ]
+
+            keys = sorted({key for k in ids for key in history_keys(k)})
+            indices = {key: i for i, key in enumerate(keys)}
+            starts = {
+                d.sha: d.manifest.get(
+                    "analysis_start_index", min(data.image_maps[d.sha])
+                )
+                for d in data.datasets
+            }
+
+            def prepare_features(batch):
+                return host_tensor(
+                    [
                         data.rgb(
-                            d.sha,
-                            max(start_frame, frame - args.window + 1 + i),
-                            a["well_uid"],
+                            sha,
+                            max(starts[sha], frame - args.window + 1 + i),
+                            well,
                             args.image_size,
                         )[0]
+                        for sha, frame, well in batch
                         for i in range(args.window)
-                    ]
-                    with torch.no_grad():
-                        feature_cache[k] = network.features(
-                            tensor(history, device)[None]
-                        )[0][0].detach()
-                return feature_cache[k]
-
-            def temporal_loss(batch):
-                histories = []
-                network.motion.eval()
-                network.spatial.eval()
-                network.flow.eval()
-                for k in batch:
-                    d, a = data.annotations[k]
-                    start_frame = d.manifest.get(
-                        "analysis_start_index", min(data.image_maps[d.sha])
-                    )
-                    histories.append(
-                        torch.stack(
-                            [
-                                features_at(
-                                    k,
-                                    max(
-                                        start_frame,
-                                        a["frame_index"] - args.window + 1 + i,
-                                    ),
-                                )
-                                for i in range(args.window)
-                            ],
-                            dim=1,
-                        )
-                    )
-                return criterion(
-                    network.temporal(torch.stack(histories))[:, :, -1], targets(batch)
+                    ],
+                    device.type == "cuda",
                 )
 
-            optimize(
-                "temporal_tgm",
-                network.temporal.parameters(),
-                args.sequence_epochs,
-                temporal_loss,
+            # Feature extraction was one GPU call per frame/well, with every
+            # feature retained on the GPU. Batch it and keep the fixed features
+            # on disk instead; TGM training now has bounded device memory.
+            progress.emit(
+                "phase_start",
+                force=True,
+                **context,
+                phase="temporal_features",
+                samples=len(keys),
+                batch_size=batch_size,
             )
+            with tempfile.TemporaryDirectory(
+                prefix="temporal-features-", dir=args.output
+            ) as temporary:
+                if (
+                    shutil.disk_usage(temporary).free
+                    < len(keys) * 1024 * 4 + 16 * 1024**2
+                ):
+                    raise ValueError(
+                        "Not enough free space in --output for temporary temporal features."
+                    )
+                features = np.lib.format.open_memmap(
+                    Path(temporary) / "features.npy",
+                    mode="w+",
+                    dtype=np.float32,
+                    shape=(len(keys), 1024),
+                )
+                try:
+                    batches = (
+                        keys[offset : offset + batch_size]
+                        for offset in range(0, len(keys), batch_size)
+                    )
+                    completed = 0
+                    with torch.no_grad():
+                        for batch, inputs in prefetched(
+                            batches, prepare_features, args.prefetch_batches
+                        ):
+                            values = (
+                                network.features(clips(batch, inputs))[0].cpu().numpy()
+                            )
+                            features[completed : completed + len(batch)] = values
+                            completed += len(batch)
+                            progress.emit(
+                                "temporal_features",
+                                **context,
+                                phase="temporal_features",
+                                samples=completed,
+                                total_samples=len(keys),
+                            )
+                    features.flush()
+
+                    def prepare_temporal(batch):
+                        rows = [indices[key] for k in batch for key in history_keys(k)]
+                        value = torch.from_numpy(
+                            features[rows]
+                            .reshape(len(batch), args.window, 1024)
+                            .transpose(0, 2, 1)
+                            .copy()
+                        )
+                        return value.pin_memory() if device.type == "cuda" else value
+
+                    optimize(
+                        "temporal_tgm",
+                        network.temporal.parameters(),
+                        args.sequence_epochs,
+                        lambda batch, inputs: criterion(
+                            network.temporal(
+                                inputs.to(device, non_blocking=device.type == "cuda")
+                            )[:, :, -1],
+                            targets(batch),
+                        ),
+                        prepare_temporal,
+                    )
+                finally:
+                    features._mmap.close()
         payload = network.state_dict()
     out.mkdir(parents=True, exist_ok=False)
     if kind == "sleap-rf":
@@ -519,7 +707,7 @@ def train_model(kind, data, run, out, args):
             "rf_trees": args.rf_trees,
             "seed": run["seed"],
             "learning_rate": args.learning_rate,
-            "batch_size": args.batch_size,
+            "batch_size": batch_size,
             "false_awake_cost": args.false_awake_cost,
             "loss": losses,
             "seconds": time.monotonic() - start,
@@ -545,6 +733,13 @@ def train_model(kind, data, run, out, args):
         meta["upstream_architectures_sha256"] = WHEEL_SHA256
     meta["version"] = model_version(meta)
     (out / "model.json").write_text(json.dumps(meta, indent=2))
+    progress.emit(
+        "model_saved",
+        force=True,
+        **context,
+        path=str(out / "model.json"),
+        seconds=time.monotonic() - start,
+    )
     return out / "model.json"
 
 
@@ -586,9 +781,17 @@ def apply_policy(records, policy):
         r["recovery_onset_frame_index"] = onset
 
 
-def evaluate_model(path, test, device="auto"):
+def evaluate_model(path, test, device="auto", progress=None):
     from backend.services.suite_metrics import metrics
 
+    if progress:
+        progress.emit(
+            "evaluation_loading",
+            force=True,
+            phase="evaluation",
+            model=str(path),
+            test=test.manifest["experiment_id"],
+        )
     model = SuiteModel(path, device)
     meta = model.meta
     if meta["architecture"] == "deepethogram" and (
@@ -612,8 +815,23 @@ def evaluate_model(path, test, device="auto"):
     }
     geometry_by_frame = test.geometry
     output = []
+    context = {
+        "architecture": meta["architecture"],
+        "run": meta["selection"]["id"],
+        "phase": "evaluation",
+        "test": test.manifest["experiment_id"],
+    }
+    if progress:
+        progress.emit(
+            "evaluation_start",
+            force=True,
+            **context,
+            total_images=len(test.manifest["images"]),
+        )
     try:
-        for image in sorted(test.manifest["images"], key=lambda im: im["frame_number"]):
+        for index, image in enumerate(
+            sorted(test.manifest["images"], key=lambda im: im["frame_number"]), 1
+        ):
             frame = image.get("frame_index", image["frame_number"] - 1)
             wells = []
             for w in test.manifest["wells"]:
@@ -634,6 +852,14 @@ def evaluate_model(path, test, device="auto"):
                 session=test.sha,
                 frame=frame,
             )
+            if progress:
+                progress.emit(
+                    "evaluating",
+                    force=index == len(test.manifest["images"]),
+                    **context,
+                    images=index,
+                    total_images=len(test.manifest["images"]),
+                )
             for r in records:
                 a = truth.get((frame, r["well_id"]))
                 w = next(
@@ -719,6 +945,35 @@ def main(argv=None):
     compare.add_argument("--flow-epochs", type=int, default=3)
     compare.add_argument("--sequence-epochs", type=int, default=5)
     compare.add_argument("--batch-size", type=int, default=4)
+    compare.add_argument(
+        "--resnet-batch-size", type=int, help="Override --batch-size for ResNet-18"
+    )
+    compare.add_argument(
+        "--pose-batch-size",
+        type=int,
+        help="Override --batch-size for SLEAP feature extraction",
+    )
+    compare.add_argument(
+        "--temporal-batch-size", type=int, help="Override --batch-size for DeepEthogram"
+    )
+    compare.add_argument(
+        "--cache-dir",
+        help="Reusable crop cache (default: OUTPUT_PARENT/.flyscope-training-cache)",
+    )
+    compare.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Disable disk crop caching; lower disk use, slower epochs",
+    )
+    compare.add_argument(
+        "--cache-workers", type=int, default=2, help="Concurrent frame preparation jobs"
+    )
+    compare.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=2,
+        help="CPU batches to prepare ahead; 0 disables prefetch",
+    )
     compare.add_argument("--image-size", type=int, default=128)
     compare.add_argument("--window", type=int, default=5)
     compare.add_argument("--learning-rate", type=float, default=0.0001)
@@ -735,9 +990,28 @@ def main(argv=None):
         parser.add_argument("--test", nargs="+", required=True)
         parser.add_argument("--output", required=True)
         parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+        parser.add_argument(
+            "--log-every",
+            type=float,
+            default=5,
+            help="Seconds between live progress messages; all batch losses are recorded",
+        )
     args = p.parse_args(argv)
+
+    # Dataset hashes can take minutes on a large grid. Be visible even before
+    # validation succeeds and the output directory may safely be created.
+    last = {}
+
+    def announce(event, force=False, **values):
+        now = time.monotonic()
+        key = (event, values.get("dataset"))
+        if force or now - last.get(key, -float("inf")) >= getattr(args, "log_every", 5):
+            print(json.dumps({"event": event, **values}), flush=True)
+            last[key] = now
+
+    announce("starting", force=True, command=args.command, output=args.output)
     if args.command == "plan":
-        data = TrainingData(args.train)
+        data = TrainingData(args.train, announce)
         plan = plan_for(data, args.seed, args.poor_well, args.rich_well)
         out = Path(args.output)
         if out.exists():
@@ -751,7 +1025,9 @@ def main(argv=None):
         raise ValueError(
             "Use a new output directory; results and weights are never overwritten."
         )
-    tests = [Dataset(root, "test") for root in args.test]
+    if args.log_every <= 0:
+        raise ValueError("--log-every must be positive.")
+    tests = [Dataset(root, "test", announce) for root in args.test]
     if args.command == "compare":
         if (
             min(
@@ -768,9 +1044,19 @@ def main(argv=None):
             or args.window < 2
             or not 0.5 <= args.confidence_threshold <= 1
             or args.false_awake_cost < 1
+            or args.cache_workers < 1
+            or args.prefetch_batches < 0
+            or any(
+                value is not None and value < 1
+                for value in (
+                    args.resnet_batch_size,
+                    args.pose_batch_size,
+                    args.temporal_batch_size,
+                )
+            )
         ):
             raise ValueError("Invalid training parameters.")
-        data = TrainingData(args.train)
+        data = TrainingData(args.train, announce)
         if "deepethogram" in args.architectures and any(
             d.manifest.get("mode") != "sequence" or len(d.manifest["images"]) < 2
             for d in data.datasets
@@ -792,19 +1078,76 @@ def main(argv=None):
             raise ValueError(
                 "Train the external SLEAP pose model first, then provide --pose-model."
             )
-        out.mkdir(parents=True)
-        (out / "comparison-plan.json").write_text(json.dumps(plan, indent=2))
-        paths = []
-        for kind in args.architectures:
-            for run in selected:
-                paths.append(train_model(kind, data, run, out / kind / run["id"], args))
     else:
         paths = model_paths(args.models)
-        out.mkdir(parents=True)
+        data, selected, plan = None, None, None
+    out.mkdir(parents=True)
+    progress = Progress(out, args.log_every)
+    args.progress = progress
+    try:
+        progress.emit(
+            "validated",
+            force=True,
+            command=args.command,
+            output=str(out),
+            arguments=vars(args) | {"progress": None},
+        )
+        if args.command == "compare":
+            (out / "comparison-plan.json").write_text(json.dumps(plan, indent=2))
+            # Fail before a costly cache build if requested CUDA is unavailable.
+            device = torch_setup(args.seed, args.device)
+            progress.emit("device_ready", force=True, device=str(device))
+            progress.emit(
+                "suite_start",
+                force=True,
+                selections=len(selected),
+                architectures=args.architectures,
+                training_runs=len(selected) * len(args.architectures),
+            )
+            if not args.no_cache:
+                data.cache = CropCache.prepare(
+                    data,
+                    selected,
+                    args.image_size,
+                    (
+                        2 * (args.window - 1)
+                        if "deepethogram" in args.architectures
+                        else 0
+                    ),
+                    args.cache_dir or out.parent / ".flyscope-training-cache",
+                    progress,
+                    args.cache_workers,
+                )
+                data.rgb.cache_clear()
+            paths = []
+            for kind in args.architectures:
+                for run in selected:
+                    paths.append(
+                        train_model(kind, data, run, out / kind / run["id"], args)
+                    )
+        finish_evaluation(paths, tests, out, args.device, progress)
+        progress.emit("complete", force=True, output=str(out), models=len(paths))
+    except BaseException as error:
+        progress.emit(
+            "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+            force=True,
+            error=str(error),
+            error_type=type(error).__name__,
+        )
+        raise
+    finally:
+        if data is not None:
+            data.rgb.cache_clear()
+            if data.cache is not None:
+                data.cache.close()
+        progress.close()
+
+
+def finish_evaluation(paths, tests, out, device, progress):
     results = []
     for path in paths:
         for test in tests:
-            result = evaluate_model(path, test, args.device)
+            result = evaluate_model(path, test, device, progress)
             results.append(result)
             name = f"{result['model']['architecture']}-{result['model']['version'][:12]}-{test.sha[:12]}.json"
             (out / name).write_text(json.dumps(result, indent=2, allow_nan=False))
