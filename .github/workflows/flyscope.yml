@@ -99,6 +99,7 @@ jobs:
           done
           curl --fail --silent --output /dev/null http://127.0.0.1:5000/api/models
           node tests/workflow-browser.cjs
+          node tests/detection-browser.cjs
           node tests/long-sequence-browser.cjs
           node tests/studies-browser.cjs
           node tests/experiments-browser.cjs

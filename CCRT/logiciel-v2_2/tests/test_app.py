@@ -70,7 +70,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(is_simple_polygon([[0,0],[1,0],[.5,.5],[1,1],[0,1]]))
 
     def test_invalid_detection_settings(self):
-        for setting in [{'diameter':'nan'},{'diameter':'-1'},{'method':'invalid'},{'layout':'invalid'}]:
+        for setting in [{'diameter':'nan'},{'diameter':'-1'},{'method':'invalid'},{'layout':'invalid'},{'margin':'nan'},{'margin':-1},{'margin':21}]:
             response=self.client.post('/api/detect',data={**setting,'image':(io.BytesIO(self.image),'test.png')})
             self.assertEqual(response.status_code,400)
 

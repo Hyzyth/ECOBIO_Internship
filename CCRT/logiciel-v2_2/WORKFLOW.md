@@ -140,6 +140,10 @@ python tools/sleap_pose.py train --labels /path/to/overhead-labels.slp \
 
 Parent hash and skeleton must match. If you trained `pose-overhead`, use that directory instead of `pose-base` in the comparison commands below. Use the same pose parent across CCRT selections. Model B trains state and occupancy forests separately per selected CCRT subset; the external pose parent stays fixed, preserving the CCRT annotation budgets.
 
+### Updating automatic well detection
+
+Stop the running Flask server after updating the code, restart it with `python app.py`, and reload the browser page. A page served by an older running detector now asks for a restart before accepting proposals. The new fitter searches the original-resolution outer lip rather than relying on the smaller Hough ring. Nonzero margin includes at least three source pixels to protect edge details at small resolutions. Nearby wells limit added margin without shrinking the fitted boundary; weak rims are recovered only with neighbour and image evidence. Check flies near the edges before approving boundaries. Use the existing resize/manual tools to retain annotations; replacing all detection proposals asks for confirmation and clears that review, so save a project backup first.
+
 ### Large experiments and exported files
 
 For thousands of frames, use **Save dataset to folder (large experiments)** in Chrome/Chromium or Edge. Choose a parent folder; the app creates a new `flyscope-ccrt-…` (or `flyscope-eggs-…`) subfolder and writes originals one at a time. Wait for **Dataset saved in …**. `dataset-complete.json` is written last; a cancelled/failed export folder must be exported again. Your app annotations are retained. Keep the source images until you have verified the saved dataset.

@@ -103,7 +103,7 @@
             </select></label>
             <label>Approximate well diameter (pixels)<input id="diameter" type="number" min="1" placeholder="Automatic" /></label>
             <label>Extra rim margin (%)<input id="rimMargin" type="number" min="0" max="20" step="1" value="4" /></label>
-            <p class="hint">Fits the observed outer rim, then adds this margin. Growth is limited by neighbouring wells. Check flies near the edges before approving.</p>
+            <p class="hint">Fits the outer lip at original resolution, then adds this margin (at least 3 source pixels when nonzero). Nearby wells limit added padding without shrinking the rim. Check flies near the edges before approving.</p>
             <p class="hint" id="detectionHint"></p>
             <button id="setRegion" class="secondary">Limit detection to an area</button>
             <button id="clearRegion" class="secondary">Clear detection area</button>

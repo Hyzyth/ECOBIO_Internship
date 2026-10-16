@@ -4,6 +4,7 @@ Example: python tools/validate_samples.py --samples /path/Extract --output /tmp/
 Optional --manifest supplies manually reviewed counts and fixture exclusion zones.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -32,12 +33,26 @@ def main():
         result=detect_wells(content);wells=result['wells']
         if not wells or not all(is_simple_polygon(w['points']) for w in wells): raise ValueError(f'{frame.name}: no valid wells.')
         expected=manifest.get(frame.name,{})
+        if 'image_sha256' in expected and hashlib.sha256(content).hexdigest()!=expected['image_sha256']:
+            raise ValueError(f'{frame.name}: manifest belongs to a different image.')
         if 'complete_well_count' in expected and sum(not w.get('partial',False) for w in wells)!=expected['complete_well_count']: raise ValueError(f'{frame.name}: expected {expected["complete_well_count"]}, detected {len(wells)}.')
         if 'partial_well_count' in expected and sum(w.get('partial',False) for w in wells)!=expected['partial_well_count']:raise ValueError(f'{frame.name}: partial well count differs.')
         centers=np.array([np.mean(w['points'],axis=0) for w in wells])
         for zone in expected.get('fixture_exclusion_zones',[]):
             if np.any(np.linalg.norm(centers-zone['center'],axis=1)<zone['radius']): raise ValueError(f'{frame.name}: mounting fixture proposed as a well.')
+        checked=set()
+        for landmark in expected.get('well_landmarks',[]):
+            distances=np.linalg.norm(centers-landmark['center'],axis=1)
+            well=int(distances.argmin())
+            if distances[well]>landmark.get('tolerance',.03) or well in checked:
+                raise ValueError(f'{frame.name}: missing or ambiguous landmark {landmark.get("name", "well")}.')
+            checked.add(well)
+            polygon=np.float32(wells[well]['points'])
+            for point in landmark.get('must_contain',[]):
+                if cv2.pointPolygonTest(polygon,tuple(point),False)<0:
+                    raise ValueError(f'{frame.name}: boundary cuts coverage landmark {landmark.get("name", "well")}.')
         row={'filename':frame.name,'complete_proposals':sum(not w.get('partial',False) for w in wells),'partial_proposals':sum(w.get('partial',False) for w in wells),'method':result['method'],'fixture_zones_checked':len(expected.get('fixture_exclusion_zones',[]))}
+        row['well_landmarks_checked']=len(checked)
         if base_wells is None:
             base_wells=[{'id':str(i),'points':w['points']} for i,w in enumerate(wells)];reference=content;base_centers=centers
         else:
