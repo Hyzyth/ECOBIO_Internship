@@ -758,6 +758,10 @@ async function detect() {
       return status(
         "Detection cancelled. Existing boundaries and annotations were retained.",
       );
+    if (!data.settings?.algorithm_version?.startsWith("native-outer-rims-"))
+      throw Error(
+        "The app server is using an older detector. Restart the app after updating, then reload this page. Existing boundaries and annotations are unchanged.",
+      );
     if (!data.wells.length) {
       status(
         "No matching wells found. Existing wells are preserved. Try a diameter override, another detection method, or draw boundaries manually.",
@@ -777,11 +781,19 @@ async function detect() {
         source: w.source,
         confidence: w.confidence,
         ring_coverage: w.ring_coverage ?? null,
+        outer_rim_coverage: w.outer_rim_coverage ?? null,
+        recovered_from_neighbours: !!w.recovered_from_neighbours,
+        algorithm_version: data.settings?.algorithm_version || null,
         partial: w.partial ?? false,
         review_required: true,
       }),
     );
-    status(`${data.wells.length} proposals. ${data.warning}`);
+    const recovered = data.wells.filter(
+      (w) => w.recovered_from_neighbours,
+    ).length;
+    status(
+      `${data.wells.length} proposals.${recovered ? ` ${recovered} additional rim${recovered === 1 ? "" : "s"} found using neighbouring wells and visible edges.` : ""} ${data.warning}`,
+    );
   } catch (e) {
     status(e.message);
   } finally {

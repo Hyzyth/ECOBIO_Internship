@@ -23,7 +23,51 @@ def scene():
     return image,centers
 
 
+def inner_reflection_scene():
+    image=np.full((1100,1100),178,np.uint8)
+    expected=[]
+    for row in range(11):
+        for col in range(6 if row%2==0 else 5):
+            x,y=180+col*140+(row%2)*70,110+row*80
+            expected.append((x,y))
+            cv2.ellipse(image,(x,y),(44,48),5,0,360,190,1)
+            if (row,col)!=(8,4): cv2.ellipse(image,(x,y),(31,34),5,0,360,225,2)
+            cv2.ellipse(image,(x+28,y+20),(12,5),15,0,360,45,-1)
+    for center in [(50,50),(1050,50),(50,1050),(1050,1050)]:
+        for radius in [25,32,40]: cv2.circle(image,center,radius,210,2)
+    return image, expected
+
+
 class DetectionVariations(unittest.TestCase):
+    def test_inner_reflections_do_not_hide_faint_well_or_clip_edge_fly(self):
+        # Strong smaller rings dominated the old Hough seeds. The outer lip
+        # must determine the boundary, including when one inner ring is absent.
+        image,expected=inner_reflection_scene()
+        wells=detect_wells(cv2.imencode('.png',image)[1].tobytes())['wells']
+        self.assertEqual(len(wells),len(expected))
+        for x,y in expected:
+            well=min(wells,key=lambda w:np.linalg.norm(np.mean(w['points'],axis=0)*[1100,1100]-[x,y]))
+            polygon=np.float32(well['points'])*[1100,1100]
+            self.assertGreaterEqual(cv2.pointPolygonTest(polygon.astype(np.float32),(x+39,y+20),False),0)
+        self.assertTrue(any(w['recovered_from_neighbours'] for w in wells))
+
+    def test_diagonal_neighbours_do_not_shrink_rim_or_create_half_row_wells(self):
+        image=np.full((730,1150),170,np.uint8)
+        expected=[]
+        for row in range(7):
+            for col in range(6):
+                x,y=100+col*160+(row%2)*80,100+row*80
+                expected.append((x,y))
+                cv2.ellipse(image,(x,y),(60,50),0,0,360,205,2)
+                cv2.circle(image,(x,y),43,230,2)
+                cv2.ellipse(image,(x+48,y),(10,4),0,0,360,40,-1)
+        wells=detect_wells(cv2.imencode('.png',image)[1].tobytes())['wells']
+        self.assertEqual(len(wells),len(expected))
+        for x,y in expected:
+            well=min(wells,key=lambda w:np.linalg.norm(np.mean(w['points'],axis=0)*[1150,730]-[x,y]))
+            polygon=np.float32(well['points'])*[1150,730]
+            self.assertGreaterEqual(cv2.pointPolygonTest(polygon.astype(np.float32),(x+57,y),False),0)
+
     def test_light_tray_elliptical_rims_weak_well_and_edge_fly(self):
         image=np.full((1050,1000),185,np.uint8)
         expected=[]

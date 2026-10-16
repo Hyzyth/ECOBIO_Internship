@@ -8,6 +8,8 @@ import cv2
 from backend.services.geometry import is_simple_polygon, clip_polygon
 import numpy as np
 
+DETECTOR_VERSION = 'native-outer-rims-v3'
+
 
 def _circles(gray, diameter=None, region=None):
     h, w = gray.shape
@@ -95,55 +97,226 @@ def _circles(gray, diameter=None, region=None):
     return [c for c,n in zip(group,neighbours) if n >= 2]
 
 
-def _rim_polygon(gray, candidate, margin, neighbour_distance=None, edges=None):
-    """Refine a circular seed to the outer observed elliptical rim.
+def _ellipse_radii(center, axes, rotation, origin, directions):
+    """Positive ray/ellipse intersections measured from a seed center."""
+    cosine, sine = np.cos(rotation), np.sin(rotation)
+    transform = np.array([[cosine, sine], [-sine, cosine]])
+    delta = (np.asarray(origin) - center) @ transform.T / axes
+    rays = directions @ transform.T / axes
+    a = np.sum(rays * rays, axis=1)
+    b = 2 * np.sum(rays * delta, axis=1)
+    c = np.sum(delta * delta) - 1
+    return (-b + np.sqrt(np.maximum(0, b * b - 4 * a * c))) / (2 * a)
 
-    Radial sampling excludes interior fly edges. Robust ellipse fitting allows
-    perspective changes; poor support retains the original circular proposal.
-    Growth is bounded by neighbouring centers, not by a fixed tray geometry.
+
+def _rim_polygon(gray, candidate, margin, neighbours=()):
+    """Fit observed outer lips at native resolution, independent of seed size.
+
+    Hough often locks onto a smaller internal reflection. Search several
+    coherent concentric models instead of selecting one outer pixel per ray.
+    Neighbours constrain extra context only; they never shrink an observed rim.
     """
     h, w = gray.shape
-    x, y, radius = candidate['x'], candidate['y'], candidate['radius']
-    if edges is None:
-        edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 25, 65)
-    angles = np.linspace(0, 2*np.pi, 120, endpoint=False)
-    points = []
-    for angle in angles:
-        radii = np.linspace(.88*radius, 1.22*radius, max(12, round(radius*.7)))
-        xs = np.rint(x+radii*np.cos(angle)).astype(int)
-        ys = np.rint(y+radii*np.sin(angle)).astype(int)
-        valid = (xs>=0)&(xs<w)&(ys>=0)&(ys<h)
-        hits = np.flatnonzero(valid & (edges[np.clip(ys,0,h-1), np.clip(xs,0,w-1)]>0))
-        if len(hits):
-            r = radii[hits[-1]]
-            points.append([x+r*np.cos(angle), y+r*np.sin(angle)])
-    center, axes, rotation = (x,y), (radius,radius), 0.
-    if len(points) >= 65:
-        data = np.float32(points)
-        fitted = None
-        for _ in range(3):
-            fitted = cv2.fitEllipse(data.reshape(-1,1,2))
-            (cx,cy), (major,minor), degrees = fitted
-            theta = np.deg2rad(degrees)
-            delta = data-[cx,cy]
-            u = delta[:,0]*np.cos(theta)+delta[:,1]*np.sin(theta)
-            v = -delta[:,0]*np.sin(theta)+delta[:,1]*np.cos(theta)
-            residual = np.abs(np.hypot(u/(major/2),v/(minor/2))-1)
-            keep = residual < .08
-            if keep.sum()<60: break
-            data = data[keep]
-        if fitted:
-            (cx,cy),(major,minor),degrees=fitted
-            if np.hypot(cx-x,cy-y)<.15*radius and .85*radius<min(major,minor)/2 and max(major,minor)/2<1.26*radius:
-                center, axes, rotation = (cx,cy), (major/2,minor/2), np.deg2rad(degrees)
-    axes = np.array(axes)*(1+margin/100)
-    if neighbour_distance is not None:
-        axes *= min(1., .49*neighbour_distance/max(axes))
-    a = np.linspace(0,2*np.pi,40,endpoint=False)
-    u,v=axes[0]*np.cos(a),axes[1]*np.sin(a)
-    return [[(center[0]+u0*np.cos(rotation)-v0*np.sin(rotation))/w,
-             (center[1]+u0*np.sin(rotation)+v0*np.cos(rotation))/h] for u0,v0 in zip(u,v)]
+    x, y, radius = candidate["x"], candidate["y"], candidate["radius"]
+    reach = radius * 1.75 + 4
+    left, top = max(0, int(x - reach)), max(0, int(y - reach))
+    right, bottom = min(w, int(x + reach) + 1), min(h, int(y + reach) + 1)
+    patch = gray[top:bottom, left:right]
+    smooth = cv2.GaussianBlur(patch, (5, 5), 0.9)
+    gx = cv2.Sobel(smooth, cv2.CV_32F, 1, 0)
+    gy = cv2.Sobel(smooth, cv2.CV_32F, 0, 1)
+    angles = np.linspace(0, 2 * np.pi, 160, endpoint=False)
+    directions = np.c_[np.cos(angles), np.sin(angles)]
+    radii = np.linspace(
+        0.76 * radius, 1.68 * radius, max(40, min(240, round(radius * 1.8)))
+    )
+    xs = x + directions[:, 0, None] * radii - left
+    ys = y + directions[:, 1, None] * radii - top
+    valid = (
+        (xs >= 1) & (xs < patch.shape[1] - 1) & (ys >= 1) & (ys < patch.shape[0] - 1)
+    )
+    dx = cv2.remap(gx, xs.astype(np.float32), ys.astype(np.float32), cv2.INTER_LINEAR)
+    dy = cv2.remap(gy, xs.astype(np.float32), ys.astype(np.float32), cv2.INTER_LINEAR)
+    magnitude = np.hypot(dx, dy)
+    radial = np.abs(dx * directions[:, 0, None] + dy * directions[:, 1, None])
+    noise = np.median(magnitude[valid]) if valid.any() else 0
+    edge = valid & (magnitude > max(6.0, noise * 2.5)) & (radial > 0.72 * magnitude)
+    band = max(1.5, radius * 0.065)
+    models = []
+    origin = np.array([x, y])
+    for scale in np.arange(0.9, 1.61, 0.1):
+        center, axes, rotation = origin.copy(), np.array([radius * scale] * 2), 0.0
+        for _ in range(4):
+            expected = _ellipse_radii(center, axes, rotation, origin, directions)
+            distance = np.abs(radii[None, :] - expected[:, None])
+            cost = np.where(edge & (distance <= band), distance, np.inf)
+            chosen = cost.argmin(axis=1)
+            covered = np.isfinite(cost[np.arange(len(angles)), chosen])
+            if covered.sum() < 40:
+                break
+            points = origin + directions[covered] * radii[chosen[covered], None]
+            fitted = cv2.fitEllipse(points.astype(np.float32).reshape(-1, 1, 2))
+            (cx, cy), (a, b), degrees = fitted
+            if not (
+                0.72 * radius < min(a, b) / 2
+                and max(a, b) / 2 < 1.72 * radius
+                and np.hypot(cx - x, cy - y) < 0.24 * radius
+            ):
+                break
+            center, axes, rotation = (
+                np.array([cx, cy]),
+                np.array([a / 2, b / 2]),
+                np.deg2rad(degrees),
+            )
+        expected = _ellipse_radii(center, axes, rotation, origin, directions)
+        distance = np.abs(radii[None, :] - expected[:, None])
+        covered = (edge & (distance <= max(1.25, radius * 0.045))).any(axis=1)
+        visible = (
+            (x + directions[:, 0] * expected >= 1)
+            & (x + directions[:, 0] * expected < w - 1)
+            & (y + directions[:, 1] * expected >= 1)
+            & (y + directions[:, 1] * expected < h - 1)
+        )
+        support = float(covered.mean())
+        # Evidence must span the visible quadrants, not just one fly edge.
+        distributed = all(
+            covered[q : q + 40].sum() >= min(8, visible[q : q + 40].sum() * 0.35)
+            for q in range(0, 160, 40)
+        )
+        if (
+            distributed
+            and support >= 0.52
+            and covered.sum() >= 0.62 * max(1, visible.sum())
+        ):
+            models.append((float(np.prod(axes)), center, axes, rotation, support))
+    if models:
+        _, center, axes, rotation, support = max(models, key=lambda m: m[0])
+    else:
+        center, axes, rotation, support = origin, np.array([radius, radius]), 0.0, 0.0
+    candidate["outer_rim_support"] = support
+    candidate["outer_radius"] = float(np.sqrt(np.prod(axes)))
+    candidate["refined_center"] = center.tolist()
+    # Add context outside the fitted rim, limiting only that added context
+    # along each neighbouring direction. A close diagonal neighbour cannot
+    # reduce both ellipse axes as the previous isotropic cap did.
+    a = np.linspace(0, 2 * np.pi, 48, endpoint=False)
+    unit = np.c_[np.cos(a), np.sin(a)]
+    observed = _ellipse_radii(center, axes, rotation, center, unit)
+    # A 5x5 Gaussian followed by a 3x3 derivative spans three source pixels.
+    # At small resolutions a percentage alone can be less than one pixel and
+    # clip wings/legs after resampling. Zero still requests the fitted rim only.
+    padding = np.maximum(observed * margin / 100, 3.0) if margin else 0.0
+    grown = observed + padding
+    for neighbour in neighbours:
+        delta = np.asarray(neighbour) - center
+        dot = unit @ delta
+        limit = np.divide(
+            np.dot(delta, delta), 2 * dot, out=np.full(len(unit), np.inf), where=dot > 0
+        )
+        grown = np.minimum(grown, np.maximum(observed, limit))
+    return ((center + unit * grown[:, None]) / [w, h]).tolist()
 
+
+def _recover_rims(gray, circles, region=None):
+    """Search repeated local displacements, then require actual rim evidence.
+
+    Two non-collinear neighbouring wells must support a location. Unlike pair
+    midpoints, repeated translations do not introduce half-row phantom sites
+    in staggered grids. Only one pass is made; recovered wells cannot propagate
+    an invented grid beyond the observed field.
+    """
+    if len(circles) < 8:
+        return circles
+    centers = np.array([[c["x"], c["y"]] for c in circles])
+    delta = centers[None, :, :] - centers[:, None, :]
+    distances = np.linalg.norm(delta, axis=2)
+    np.fill_diagonal(distances, np.inf)
+    spacing = float(np.median(distances.min(axis=1)))
+    radius = float(np.median([c["radius"] for c in circles]))
+    vectors = delta[(distances > 0.72 * spacing) & (distances < 1.85 * spacing)]
+    if not len(vectors):
+        return circles
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(vectors)
+    counts = tree.query_ball_point(vectors, 0.1 * spacing, return_length=True)
+    steps = []
+    for index in np.argsort(-counts):
+        if counts[index] < max(4, len(circles) * 0.06):
+            break
+        if any(
+            np.linalg.norm(vectors[index] - other) <= 0.22 * spacing for other in steps
+        ):
+            continue
+        step = np.median(
+            vectors[tree.query_ball_point(vectors[index], 0.1 * spacing)], axis=0
+        )
+        steps.append(step)
+    votes = []
+    for i, center in enumerate(centers):
+        for step in steps:
+            point = center + step
+            if np.linalg.norm(centers - point, axis=1).min() < radius * 0.9:
+                continue
+            group = next(
+                (
+                    g
+                    for g in votes
+                    if np.linalg.norm(g["point"] - point) < radius * 0.25
+                ),
+                None,
+            )
+            if group is None:
+                votes.append({"point": point, "anchors": {i}})
+            else:
+                group["anchors"].add(i)
+    hull = cv2.convexHull(centers.astype(np.float32))
+    result = list(circles)
+    for vote in votes:
+        point = vote["point"]
+        angles = [
+            np.arctan2(*(centers[i] - point)[::-1]) % np.pi for i in vote["anchors"]
+        ]
+        if not any(0.4 < abs(a - b) < np.pi - 0.4 for a in angles for b in angles):
+            continue
+        if (
+            np.linalg.norm(
+                np.array([[c["x"], c["y"]] for c in result]) - point, axis=1
+            ).min()
+            < radius * 0.9
+        ):
+            continue
+        x, y = point
+        if not (0 < x < gray.shape[1] and 0 < y < gray.shape[0]):
+            continue
+        candidate = {
+            "x": float(x),
+            "y": float(y),
+            "radius": radius,
+            "support": None,
+            "recovered": True,
+        }
+        points = _rim_polygon(gray, candidate, 0, centers)
+        outside = cv2.pointPolygonTest(hull, tuple(point), False) < 0
+        minimum_support = 0.6 if outside or len(vote["anchors"]) >= 3 else 0.72
+        if candidate["outer_rim_support"] < minimum_support:
+            continue
+        if not 0.82 * radius < candidate["outer_radius"] < 1.6 * radius:
+            continue
+        if region is not None and not all(
+            region[0] <= a <= region[2] and region[1] <= b <= region[3]
+            for a, b in points
+        ):
+            continue
+        cx, cy = candidate["refined_center"]
+        candidate.update(
+            x=cx,
+            y=cy,
+            radius=candidate["outer_radius"],
+            support=candidate["outer_rim_support"],
+        )
+        result.append(candidate)
+    return result
 
 def _single_well(gray, diameter=None, region=None):
     """Find one dominant rim in a close crop, independently of grid repetition.
@@ -281,10 +454,14 @@ def detect_wells(content, method='auto', diameter=None, region=None, layout='gri
     circles = (_single_well(gray, diameter*scale if diameter else None, region) if layout=='individual' else _circles(gray,diameter*scale if diameter else None,region)) if method!='contours' else []
     wells = []
     if circles:
-        rim_edges = cv2.Canny(cv2.GaussianBlur(gray, (3, 3), 0), 25, 65)
+        if layout == 'grid':
+            circles = _recover_rims(gray, circles, region)
+        native = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        sx, sy = w/sw, h/sh
         for c in circles:
-            distance = min((np.hypot(c['x']-d['x'],c['y']-d['y']) for d in circles if d is not c), default=None)
-            points = _rim_polygon(gray, c, margin, distance, rim_edges)
+            seed = {**c, 'x':c['x']*sx, 'y':c['y']*sy, 'radius':c['radius']*(sx+sy)/2}
+            neighbours = [[d['x']*sx, d['y']*sy] for d in circles if d is not c]
+            points = _rim_polygon(native, seed, margin, neighbours)
             if region is not None and not all(region[0]<=x<=region[2] and region[1]<=y<=region[3] for x,y in points):
                 # Never silently extend a user-defined detection area.
                 continue
@@ -293,7 +470,7 @@ def detect_wells(content, method='auto', diameter=None, region=None, layout='gri
             if not points:
                 continue
             wells.append({'points':points,'partial':partial,'source':'single-rim-proposal' if layout=='individual' else 'repeated-ring-proposal','review_required':True,
-                          'confidence':None,'ring_coverage':c['support']})
+                          'confidence':None,'ring_coverage':c['support'], 'outer_rim_coverage':seed['outer_rim_support'], 'recovered_from_neighbours':bool(c.get('recovered'))})
         used = 'single-rim' if layout=='individual' else 'grid'
     elif method=='grid':
         used = 'grid'
@@ -328,5 +505,5 @@ def detect_wells(content, method='auto', diameter=None, region=None, layout='gri
         rows[-1]['wells'].append(well)
     wells=[well for row in rows for well in sorted(row['wells'],key=lambda well:center(well)[0])]
     return {'wells':wells,'width':w,'height':h,'method':used,
-            'settings':{'method':method,'diameter_px':diameter,'region':region,'layout':layout,'rim_margin_percent':margin},
+            'settings':{'method':method,'diameter_px':diameter,'region':region,'layout':layout,'rim_margin_percent':margin,'algorithm_version':DETECTOR_VERSION},
             'warning':'Review proposals; no fixed layout or well count is assumed. Partially visible rims are clipped to the image edge and flagged; their complete shape remains unknown. Restrict the detection region to exclude mounting hardware when geometry alone is ambiguous; contour mode preserves simple non-circular/concave boundaries.'}
