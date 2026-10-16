@@ -219,12 +219,14 @@ const { step, openOptions } = require("./workflow-helpers.cjs");
       `
 import json, zipfile
 from pathlib import Path
+from backend.services.dataset_format import hydrate_manifest
 p=Path(${JSON.stringify(out)})
 for role in ['train','test']:
  with zipfile.ZipFile(p/f'{role}.zip') as z:
   assert z.testzip() is None
-  m=json.loads(z.read('annotations.json'))
+  m=hydrate_manifest(json.loads(z.read('annotations.json')))
   assert m['analysis_start_index']==2 and m['analysis_frame_count']==4
+  assert m['mode']=='sequence' and m['frame_interval_seconds']==2
   assert [im['frame_number'] for im in m['images']]==[3,4,5,6]
   assert len(m['annotations'])==8 and all(a['frame_index']>=2 for a in m['annotations'])
   assert all(a['species']=='D. melanogaster' for a in m['annotations'] if a['label']!='empty')

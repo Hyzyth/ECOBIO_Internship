@@ -102,9 +102,17 @@
               <option value="contours">Non-circular contours</option>
             </select></label>
             <label>Approximate well diameter (pixels)<input id="diameter" type="number" min="1" placeholder="Automatic" /></label>
+            <label>Extra rim margin (%)<input id="rimMargin" type="number" min="0" max="20" step="1" value="4" /></label>
+            <p class="hint">Fits the observed outer rim, then adds this margin. Growth is limited by neighbouring wells. Check flies near the edges before approving.</p>
             <p class="hint" id="detectionHint"></p>
             <button id="setRegion" class="secondary">Limit detection to an area</button>
             <button id="clearRegion" class="secondary">Clear detection area</button>
+          </details>
+          <details id="resizeOptions" data-wells>
+            <summary>Resize existing boundaries</summary>
+            <label>Size adjustment (%)<input id="resizePercent" type="number" min="-20" max="20" step="1" value="5" /></label>
+            <button id="resizeWells" class="secondary">Resize all wells across the sequence</button>
+            <p class="hint">Preserves well IDs and manual labels. Includes frame-specific corrections. Review and approve boundaries again afterwards.</p>
           </details>
           <label>Canvas tool<select id="tool">
             <option value="select">Select / move well</option>
@@ -157,10 +165,13 @@
               <label>Shared seed<input id="comparisonSeed" type="number" min="0" max="4294967295" step="1" value="2026" /></label>
               <label>Poor-pose well ID (optional)<input id="poorWell" placeholder="e.g. W3" /></label>
               <label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label>
-              <p class="hint">Every model uses the same saved selections: one full annotated grid (including Empty); 2 × 25, 5 × 10, 10 × 5 and 20 × 2 single-individual wells; one poor-pose and one rich-pose well. Oversized budgets are skipped. Unannotated wells are never negative targets.</p>
+              <p class="hint">Every model uses the same saved selections: one full annotated grid (including Empty); 1 × 25, 2 × 10, 4 × 5 and 5 × 2 single-individual wells; one poor-pose and one rich-pose well. Up to 15 runs per model. Oversized budgets are skipped. Unannotated wells are never negative targets. Previously saved plans still work in the training tools.</p>
             </details>
             <p id="datasetHint" class="hint"></p>
             <button id="training" class="secondary">Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP</button>
+            <button id="trainingFolder" class="secondary" hidden>Save dataset to folder (large experiments)</button>
+            <p class="hint">Folder saving is available in supported Chromium browsers on this computer. A new dataset subfolder is created inside the folder you choose. ZIP exports download files; they do not create a folder automatically.</p>
+            <div id="datasetDownloads" aria-live="polite" hidden></div>
           </details>
           <details id="otherExports">
             <summary>Additional export formats</summary>

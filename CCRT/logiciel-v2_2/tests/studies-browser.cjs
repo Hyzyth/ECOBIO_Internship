@@ -261,14 +261,14 @@ for task,name,expected,eligible in [('ccrt','ccrt',3,2),('eggs','egg',2,2)]:
   for im in m['images']:
    assert hashlib.sha256(z.read(im['path'])).hexdigest()==im['sha256']
    assert z.read(im['path'])==(p/im['original_filename']).read_bytes()
+  assert m['schema_version']==3;assert m['geometry_format']=='shared-well-boundaries-v1'
+  assert not any(n.startswith('crops/') for n in z.namelist())
+  from backend.services.dataset_format import hydrate_manifest
+  hydrate_manifest(m)
   for a in m['annotations']:
    assert a['label_source']=='manual';assert a['boundary_reviewed'];assert a['split_group']==f'synthetic-{"ccrt" if task=="ccrt" else "egg"}-run'
-   import io
-   crop=Image.open(io.BytesIO(z.read(a['crop_path'])));assert crop.size==tuple(a['bbox_pixels'][2:]);assert crop.mode=='RGBA'
-   source=Image.open(p/a['filename']);x,y,w,h=a['bbox_pixels'];assert crop.getpixel((w//2,h//2))[:3]==source.getpixel((x+w//2,y+h//2))
   if task=='ccrt':
    assert [a['label'] for a in m['annotations']]==['coma','unknown','awake'];assert m['annotations'][1]['boundary_normalized'][0][0]>.2
-   second=Image.open(io.BytesIO(z.read(m['annotations'][1]['crop_path'])));assert second.getpixel((0,0))[3]==0
   else:assert [a['label'] for a in m['annotations']]==[0,12]
   dest=p/f'{name}-dataset';z.extractall(dest)
   spec=importlib.util.spec_from_file_location('dataset',dest/'dataset.py');module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);rows=list(module.samples(dest));assert len(rows)==eligible;assert all(r['image'].mode=='RGB' for r in rows)
@@ -278,7 +278,7 @@ for task,name,expected,eligible in [('ccrt','ccrt',3,2),('eggs','egg',2,2)]:
   else:assert 'state' not in r['results'][0];assert [s['Egg count'] for s in r['results']]==[0,12]
 with zipfile.ZipFile(p/'ccrt-machine.zip') as z:
  m=json.loads(z.read('machine.json'));assert m['kind']=='ccrt-machine-report';assert m['time_origin']['offset_seconds']==5;assert len(m['results'])==3;assert m['recovery'][0]['ccrt_seconds'] is None;assert m['recovery'][0]['recovery_upper_seconds']==7;assert 'frames.csv' in z.namelist();assert 'project.json' in z.namelist()
-print('ZIP integrity, original image hashes, per-frame polygon crops, masks, manual targets, eligibility, Python loader and task-specific reports passed.')
+print('ZIP integrity, original image hashes, shared per-frame geometry, lazy crops, manual targets, eligibility, Python loader and task-specific reports passed.')
 `,
     ],
     { stdio: "inherit" },

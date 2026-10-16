@@ -4,7 +4,7 @@ import cv2
 
 # Bound OpenCV workers; large host CPU counts can slow interactive Hough calls.
 cv2.setNumThreads(2)
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, send_file
 from backend.services.detection import detect_wells
 from backend.services.alignment import align_wells
 from backend.services.model_registry import available_models, analyze
@@ -24,13 +24,16 @@ def eggs():
 @app.get('/api/models')
 def models():
     return jsonify(available_models())
+@app.get('/api/dataset-format')
+def dataset_format():
+    return send_file(BASE_DIR / 'backend/services/dataset_format.py', mimetype='text/x-python')
 @app.post('/api/detect')
 def detect():
     image = request.files.get('image')
     if not image:
         return jsonify(error='Select an image first.'), 400
     try:
-        return jsonify(detect_wells(image.read(), request.form.get('method','auto'), request.form.get('diameter'), request.form.get('region'), request.form.get('layout','grid')))
+        return jsonify(detect_wells(image.read(), request.form.get('method','auto'), request.form.get('diameter'), request.form.get('region'), request.form.get('layout','grid'), request.form.get('margin', 4)))
     except ValueError as exc:
         return jsonify(error=str(exc)), 400
 @app.post('/api/align')

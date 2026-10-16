@@ -40,10 +40,10 @@
       });
     runs.push(make("all-annotated-wells", pool, seed));
     const budgets = options.budgets || [
-      { wells: 25, repeats: 2 },
-      { wells: 10, repeats: 5 },
-      { wells: 5, repeats: 10 },
-      { wells: 2, repeats: 20 },
+      { wells: 25, repeats: 1 },
+      { wells: 10, repeats: 2 },
+      { wells: 5, repeats: 4 },
+      { wells: 2, repeats: 5 },
     ];
     for (const budget of budgets) {
       if (
@@ -99,7 +99,7 @@
       seed,
       experiment_id: manifest.experiment_id,
       selection_unit: "well",
-      protocol: "full-grid-plus-25x2-10x5-5x10-2x20-poor-rich-v2",
+      protocol: "full-grid-plus-25x1-10x2-5x4-2x5-poor-rich-v3",
       eligible_individual_count: individuals.length,
       eligible_well_count: pool.length,
       detected_well_count: manifest.coverage?.detected_wells ?? pool.length,

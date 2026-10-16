@@ -30,8 +30,7 @@
         throw Error("Invalid archive path.");
       const name = encoder.encode(entry.name),
         blob = entry.blob || new Blob([entry.text]);
-      const bytes = new Uint8Array(await blob.arrayBuffer()),
-        crc = crc32(bytes),
+      const crc = await blobCRC(blob, cancelled),
         size = blob.size;
       if (size > 0xffffffff || offset + 30 + name.length + size > 0xffffffff)
         throw Error(
@@ -76,6 +75,107 @@
     v.setUint32(12, centralSize, true);
     v.setUint32(16, offset, true);
     return new Blob([...parts, ...central, end], { type: "application/zip" });
+  }
+  async function blobCRC(blob, cancelled) {
+    const reader = blob.stream().getReader();
+    let crc = 0xffffffff,
+      chunks = 0;
+    try {
+      for (;;) {
+        if (cancelled()) throw Error("Archive export cancelled.");
+        const { value, done } = await reader.read();
+        if (done) return (crc ^ 0xffffffff) >>> 0;
+        for (const byte of value)
+          crc = crcTable[(crc ^ byte) & 255] ^ (crc >>> 8);
+        if (++chunks % 16 === 0)
+          await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    } finally {
+      await reader.cancel();
+    }
+  }
+  async function writeEntry(directory, entry, cancelled) {
+    if (cancelled())
+      throw Error(
+        "Dataset export cancelled; the new folder is incomplete. Export again into a new folder.",
+      );
+    const segments = entry.name.split("/");
+    let parent = directory;
+    for (const segment of segments.slice(0, -1))
+      parent = await parent.getDirectoryHandle(segment, { create: true });
+    const handle = await parent.getFileHandle(segments.at(-1), {
+      create: true,
+    });
+    const writer = await handle.createWritable();
+    try {
+      const blob = entry.blob || new Blob([entry.text]);
+      const reader = blob.stream().getReader();
+      try {
+        for (;;) {
+          if (cancelled())
+            throw Error(
+              "Dataset export cancelled; the new folder is incomplete.",
+            );
+          const { value, done } = await reader.read();
+          if (done) break;
+          await writer.write(value);
+        }
+      } finally {
+        await reader.cancel();
+      }
+      await writer.close();
+    } catch (error) {
+      try {
+        await writer.abort();
+      } catch {
+        /* Preserve the original write error. */
+      }
+      throw error;
+    }
+  }
+  async function zipParts(
+    entries,
+    onProgress = () => {},
+    cancelled = () => false,
+    partBytes = 256 * 1024 * 1024,
+  ) {
+    if (
+      !Number.isFinite(partBytes) ||
+      partBytes < 128 ||
+      partBytes > 512 * 1024 * 1024
+    )
+      throw Error("Invalid ZIP part size.");
+    const parts = [];
+    let group = [],
+      bytes = 22,
+      complete = 0;
+    async function flush() {
+      if (!group.length) return;
+      const current = group;
+      parts.push(
+        await zip(
+          current,
+          (done) => onProgress(complete + done, entries.length),
+          cancelled,
+        ),
+      );
+      complete += current.length;
+      group = [];
+      bytes = 22;
+    }
+    for (const entry of entries) {
+      const blob = entry.blob || new Blob([entry.text]),
+        size = blob.size + 76 + 2 * encoder.encode(entry.name).length;
+      if (size + 22 > 512 * 1024 * 1024)
+        throw Error(
+          "One metadata file exceeds the portable ZIP limit. Use Save dataset to folder for this experiment.",
+        );
+      if (bytes + size > partBytes || group.length >= 60000) await flush();
+      group.push({ name: entry.name, blob });
+      bytes += size;
+    }
+    await flush();
+    return parts;
   }
   function png(canvas) {
     return new Promise((resolve, reject) =>
@@ -152,7 +252,9 @@
   ) {
     const role = options.role || "train";
     if (!["train", "test"].includes(role)) throw Error("Invalid dataset role.");
-    const annotations = ReviewCore.trainingAnnotations(project);
+    const annotations = ReviewCore.trainingAnnotations(project, {
+      compact: true,
+    });
     if (!annotations.length)
       throw Error(
         "Add manual state labels or egg counts before exporting training data.",
@@ -160,14 +262,11 @@
     const entries = [],
       images = [],
       task = ReviewCore.taskOf(project),
-      // Temporal models need contiguous context even when only a few frames
-      // have labels. Unlabeled images never become supervised targets.
       frames = ReviewCore.analysisIndices(project);
+    // One original per frame. All model loaders derive masked crops lazily.
+    // Work is linear in frames + annotations, never frames × annotations.
     for (const [n, i] of frames.entries()) {
-      if (cancelled())
-        throw Error(
-          "Training export cancelled. No incomplete archive was downloaded.",
-        );
+      if (cancelled()) throw Error("Dataset export cancelled.");
       const file = files[i],
         ext =
           file.name.match(/\.(png|jpe?g|bmp|webp)$/i)?.[1].toLowerCase() ||
@@ -182,75 +281,45 @@
           (b) => b.toString(16).padStart(2, "0"),
         ).join("");
         images.push({
-          frame_number: i + 1,
           ...ReviewCore.frameTiming(project, i),
           frame_index: i,
           original_filename: project.frames[i].name,
+          timestamp: project.frames[i].timestamp,
           path: imagePath,
           width: image.width,
           height: image.height,
           sha256: sha,
         });
-        entries.push({ name: imagePath, blob: file });
-        for (const a of annotations.filter((a) => a.frame_index === i))
-          Object.assign(a, {
-            image_path: imagePath,
-            image_width: image.width,
-            image_height: image.height,
-            boundary_pixels: a.boundary_normalized.map((p) => [
-              p[0] * image.width,
-              p[1] * image.height,
-            ]),
-          });
-        for (const [j, a] of annotations
-          .filter((a) => role !== "test" && a.frame_index === i)
-          .entries()) {
-          if (cancelled()) throw Error("Training export cancelled.");
-          const points = a.boundary_normalized.map((p) => [
-              p[0] * image.width,
-              p[1] * image.height,
-            ]),
-            xs = points.map((p) => p[0]),
-            ys = points.map((p) => p[1]);
-          const x = Math.max(0, Math.floor(Math.min(...xs))),
-            y = Math.max(0, Math.floor(Math.min(...ys))),
-            right = Math.min(image.width, Math.ceil(Math.max(...xs))),
-            bottom = Math.min(image.height, Math.ceil(Math.max(...ys)));
-          const crop = document.createElement("canvas");
-          crop.width = right - x;
-          crop.height = bottom - y;
-          const ctx = crop.getContext("2d");
-          ctx.beginPath();
-          points.forEach((p, k) =>
-            k ? ctx.lineTo(p[0] - x, p[1] - y) : ctx.moveTo(p[0] - x, p[1] - y),
+        if (options.directory)
+          await writeEntry(
+            options.directory,
+            { name: imagePath, blob: file },
+            cancelled,
           );
-          ctx.closePath();
-          ctx.clip();
-          ctx.drawImage(image, -x, -y);
-          const cropPath = `crops/frame-${String(i + 1).padStart(6, "0")}-region-${String(j + 1).padStart(4, "0")}.png`;
-          Object.assign(a, {
-            image_path: imagePath,
-            crop_path: cropPath,
-            image_width: image.width,
-            image_height: image.height,
-            boundary_pixels: points,
-            bbox_pixels: [x, y, right - x, bottom - y],
-            mask_encoding: "PNG alpha channel: outside polygon transparent",
-          });
-          entries.push({ name: cropPath, blob: await png(crop) });
-          crop.width = crop.height = 0;
-        }
+        else entries.push({ name: imagePath, blob: file });
       } finally {
         release();
       }
-      onProgress(n + 1, frames.length);
+      onProgress(
+        n + 1,
+        frames.length,
+        options.directory ? "saving-images" : "images",
+      );
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
+    onProgress(0, 1, "metadata");
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const manifest = {
-      schema_version: 2,
+      schema_version: 3,
+      geometry_format: "shared-well-boundaries-v1",
+      completion_marker: "dataset-complete.json",
+      crop_storage: "derived-on-load",
       role,
       kind: `${task}-${role === "test" ? "test" : "training"}`,
       task,
+      mode: project.mode,
+      frame_interval_seconds:
+        project.mode === "sequence" ? project.interval : null,
       experiment_id: project.experiment_id,
       split_group: project.experiment_id,
       created_at: new Date().toISOString(),
@@ -289,18 +358,19 @@
         occupancy: w.occupancy || "unknown",
         species:
           w.occupancy === "empty" ? null : w.species || project.species || null,
-        frames: project.frames
-          .map((_, i) => ({
-            frame_index: i,
-            points: ReviewCore.geometry(w, i),
-            active: ReviewCore.activeWell(w, i),
-            boundary_reviewed: !ReviewCore.boundaryNeedsReview(w, i),
-            partial: w.partial_frames?.[i] ?? !!w.detection.partial,
-          }))
-          .filter(
-            (f) =>
-              f.active && f.frame_index >= ReviewCore.analysisStart(project),
-          ),
+        points: w.points,
+        overrides: w.overrides || {},
+        active_frames: w.active_frames || null,
+        review_required: !!w.detection.review_required,
+        review_frames: w.review_frames || [],
+        partial: !!w.detection.partial,
+        partial_frames: w.partial_frames || {},
+        annotation_unit:
+          task === "eggs"
+            ? ReviewCore.imageArea(w)
+              ? "image"
+              : "region"
+            : "well",
       })),
       coverage: {
         detected_wells: project.wells.length,
@@ -335,7 +405,7 @@
         "Egg targets are provisional independent-image or optional region counts; no well layout is assumed.",
       ],
     };
-    const manifestText = JSON.stringify(manifest, null, 2);
+    const manifestText = JSON.stringify(manifest);
     entries.push({ name: "annotations.json", text: manifestText });
     if (role === "train") {
       const response = await fetch("/static/dataset-loader.py");
@@ -344,11 +414,14 @@
       entries.push(
         {
           name: "project.json",
-          text: JSON.stringify(ReviewCore.exportProject(project), null, 2),
+          text: JSON.stringify(ReviewCore.projectBackup(project)),
         },
-        { name: "annotations.csv", text: ReviewCore.tableCSV(annotations) },
         { name: "dataset.py", text: await response.text() },
       );
+      const format = await fetch("/api/dataset-format");
+      if (!format.ok)
+        throw Error("Dataset format loader unavailable; export stopped.");
+      entries.push({ name: "dataset_format.py", text: await format.text() });
       if (task === "ccrt") {
         const plan = DatasetPlans.build(manifest, options.comparisons || {});
         plan.dataset_sha256 = Array.from(
@@ -359,7 +432,7 @@
         ).join("");
         entries.push({
           name: "comparison-plan.json",
-          text: JSON.stringify(plan, null, 2),
+          text: JSON.stringify(plan),
         });
       }
     }
@@ -368,18 +441,37 @@
       text:
         role === "test"
           ? "FlyScope evaluation-only dataset. Original images and manual annotations/geometry only; no duplicate crops, project history or training extras. Use tools/model_experiments.py evaluate or compare. Score only eligible annotated wells; unannotated wells are never negatives. This is not an editable project backup. Keep this grid separate from training.\n"
-          : "FlyScope training dataset: original images, alpha-masked crops, manual targets, geometry, provenance and project backup. Partial annotations are supported; unannotated wells are omitted. Empty is a manual occupancy target; coma/awake requires one individual. Keep comparison-plan.json identical across models; each run selects entire wells, only their eligible labels, and fixed seeds. Poor/rich well IDs are experiment selections, not special annotation notes. Unzip then use tools/model_experiments.py; see repository README. dataset.py is a generic Pillow loader; model_experiments uses the original pixels and shared model preprocessing.\n",
+          : "FlyScope training dataset: original images, shared well boundaries, manual targets, geometry, provenance and project backup. Partial annotations are supported; unannotated wells are omitted. Empty is a manual occupancy target; coma/awake requires one individual. Keep comparison-plan.json identical across models; each run selects entire wells, only their eligible labels, and fixed seeds. Poor/rich well IDs are experiment selections, not special annotation notes. Unzip then use tools/model_experiments.py; see repository README. Crops are derived lazily by dataset.py and every model trainer; no duplicate per-well PNGs are required. Extract ALL ZIP parts into the SAME empty directory before training. See WORKFLOW.md.\n",
     });
-    if (cancelled()) throw Error("Training export cancelled.");
+    entries.push({
+      name: "dataset-complete.json",
+      text: JSON.stringify({
+        schema_version: 1,
+        image_count: images.length,
+        annotated_sample_count: annotations.length,
+      }),
+    });
+    if (cancelled()) throw Error("Dataset export cancelled.");
+    if (options.directory) {
+      for (const [i, entry] of entries.entries()) {
+        await writeEntry(options.directory, entry, cancelled);
+        onProgress(i + 1, entries.length, "metadata");
+      }
+      return { manifest, directory: options.directory.name };
+    }
+    const archives = await zipParts(
+      entries,
+      (done, total) => onProgress(done, total, "archive"),
+      cancelled,
+      options.partBytes,
+    );
     return {
-      blob: await zip(
-        entries,
-        (done, total) => onProgress(done, total, "archive"),
-        cancelled,
-      ),
+      blob: archives.length === 1 ? archives[0] : null,
+      archives,
       manifest,
     };
   }
+
   async function readArchiveJSON(file) {
     const tail = new Uint8Array(
         await file.slice(Math.max(0, file.size - 65557)).arrayBuffer(),
@@ -442,8 +534,8 @@
     if (
       entries.filter((e) => e.name === entry.name).length !== 1 ||
       entry.flags & 1 ||
-      entry.size > 32 * 1024 * 1024 ||
-      entry.compressed > 32 * 1024 * 1024
+      entry.size > 512 * 1024 * 1024 ||
+      entry.compressed > 512 * 1024 * 1024
     )
       throw Error("Unsupported or oversized project metadata.");
     const header = new DataView(
@@ -492,6 +584,8 @@
 
   const api = {
     readArchiveJSON,
+    zipParts,
+    writeEntry,
     zip,
     crc32,
     png,

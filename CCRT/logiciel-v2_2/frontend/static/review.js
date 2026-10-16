@@ -474,16 +474,20 @@ function renderSummary() {
       const td = document.createElement("td"),
         spark = document.createElement("div");
       spark.className = "spark";
-      C.analysisIndices(project).forEach((i) => {
-        const state = C.effective(
-            project.records[C.key(i, project.wells[rowIndex].uid)],
-            project.wells[rowIndex],
-          ),
-          span = document.createElement("span");
-        span.style.background = colors[state];
-        span.title = `Frame ${i + 1}: ${state}`;
-        spark.append(span);
-      });
+      C.stateRuns(project, project.wells[rowIndex]).forEach(
+        ({ state, start, end }) => {
+          const span = document.createElement("span");
+          span.style.background = colors[state];
+          span.style.flexGrow = end - start + 1;
+          span.title = `Frames ${start + 1}–${end + 1}: ${state}`;
+          spark.append(span);
+        },
+      );
+      spark.setAttribute("role", "img");
+      spark.setAttribute(
+        "aria-label",
+        `${row.Well}: ${C.analysisIndices(project).length} frames, from first to last. Hover a segment for frame range and state.`,
+      );
       td.append(spark);
       tr.append(td);
     }
@@ -665,6 +669,9 @@ function setBusy(value) {
     "detect",
     "detectionMethod",
     "diameter",
+    "rimMargin",
+    "resizePercent",
+    "resizeWells",
     "proposalSelect",
     "align",
     "alignSequence",
@@ -691,6 +698,7 @@ function setBusy(value) {
     "eggScope",
     "confirmSingles",
     "training",
+    "trainingFolder",
     "datasetTest",
     "comparisonSeed",
     "poorWell",
@@ -742,6 +750,7 @@ async function detect() {
       $("layout").value === "individual" ? "individual" : "grid",
     );
     form.append("diameter", $("diameter").value);
+    form.append("margin", $("rimMargin").value);
     if (project.detection_region)
       form.append("region", JSON.stringify(project.detection_region));
     const data = await post("/api/detect", form);
@@ -1365,7 +1374,7 @@ function download(name, text, type) {
 $("json").onclick = () =>
   download(
     `flyscope-${study}-project.json`,
-    JSON.stringify(C.exportProject(project), null, 2),
+    JSON.stringify(C.projectBackup(project)),
     "application/json",
   );
 $("csv").onclick = () =>
@@ -1719,7 +1728,8 @@ function updateContext() {
     : `Export ${study === "ccrt" ? "CCRT" : "egg"} training dataset ZIP`;
   $("datasetHint").textContent = $("datasetTest").checked
     ? "Evaluation images and annotations only. Unannotated areas are not scored. Save a project backup separately to resume editing."
-    : "Original images, masked crops and manual targets. Partial annotation is supported; uncertain or unreviewed samples remain flagged. Model predictions are not training labels.";
+    : "Original images and shared boundaries; crops are made by the trainers as needed. Partial annotations are supported. For large experiments, save directly to a folder. ZIP exports are split into bounded parts; extract every part into the same folder.";
+  $("trainingFolder").hidden = typeof window.showDirectoryPicker !== "function";
   $("analyze").hidden = $("model").value === "manual";
   $("detectionHint").textContent =
     $("detectionMethod").value === "contours"
@@ -1824,14 +1834,18 @@ $("report").onclick = async () => {
       entries = [
         {
           name: "project.json",
-          text: JSON.stringify(C.exportProject(project), null, 2),
+          text: JSON.stringify(C.projectBackup(project)),
         },
         { name: "report.json", text: JSON.stringify(report, null, 2) },
         { name: "results.csv", text: C.tableCSV(report.results) },
         { name: "summary.csv", text: C.tableCSV(report.summary) },
         {
           name: "well-locations.csv",
-          text: C.tableCSV(C.resultsReport(project).well_map),
+          text: C.tableCSV(
+            study === "eggs"
+              ? project.frames.flatMap((_, i) => C.wellMap(project, i))
+              : C.wellMap(project),
+          ),
         },
         { name: "report.html", text: humanHTML(report) },
       ];
@@ -1873,24 +1887,47 @@ $("report").onclick = async () => {
     renderFrame();
   }
 };
-$("training").onclick = async () => {
+let datasetDownloadURLs = [];
+async function exportDataset(toFolder = false) {
   if (!files.length) return status("Load images first.");
+  let directory;
+  if (toFolder) {
+    try {
+      const parent = await window.showDirectoryPicker({ mode: "readwrite" });
+      directory = await parent.getDirectoryHandle(
+        `flyscope-${study}-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+        { create: true },
+      );
+    } catch (error) {
+      return status(
+        error.name === "AbortError"
+          ? "Folder selection cancelled. Annotations are unchanged."
+          : `Cannot open export folder: ${error.message}`,
+      );
+    }
+  }
   stop();
   cancelled = false;
   setBusy(true);
+  $("progress").value = 0;
+  datasetDownloadURLs.forEach(URL.revokeObjectURL);
+  datasetDownloadURLs = [];
+  $("datasetDownloads").replaceChildren();
+  $("datasetDownloads").hidden = true;
   try {
-    const { blob, manifest } = await TrainingExport.training(
+    const { archives, manifest } = await TrainingExport.training(
       project,
       files,
       (done, total, phase) => {
         $("progress").max = total;
         $("progress").value = done;
         status(
-          `${phase === "archive" ? "Packing" : "Preparing"} ${study} dataset: ${phase === "archive" ? "file" : "image"} ${done} / ${total}…`,
+          `${phase === "archive" ? "Packing ZIP files" : phase === "metadata" ? "Writing annotations and shared selections" : phase === "saving-images" ? "Saving original images to folder" : "Hashing original images"}: ${done} / ${total}… Export is complete only when a saved-folder message or download links appear.`,
         );
       },
       () => cancelled,
       {
+        directory,
         role: $("datasetTest").checked ? "test" : "train",
         comparisons: {
           seed: Number($("comparisonSeed").value),
@@ -1900,21 +1937,40 @@ $("training").onclick = async () => {
       },
     );
     if (cancelled) throw Error("Dataset export cancelled.");
-    download(
-      `flyscope-${study}-${manifest.role === "test" ? "test" : "training"}.zip`,
-      blob,
-      "application/zip",
-    );
+    if (archives) {
+      const box = $("datasetDownloads"),
+        intro = document.createElement("p");
+      intro.textContent =
+        archives.length === 1
+          ? "Dataset ready. If downloading did not start, use this link:"
+          : `Dataset ready in ${archives.length} ZIP parts. Save every part, then extract all of them into the same empty folder:`;
+      box.append(intro);
+      archives.forEach((blob, i) => {
+        const a = document.createElement("a"),
+          url = URL.createObjectURL(blob);
+        datasetDownloadURLs.push(url);
+        a.href = url;
+        a.download = `flyscope-${study}-${manifest.role === "test" ? "test" : "training"}${archives.length > 1 ? `-part-${String(i + 1).padStart(3, "0")}` : ""}.zip`;
+        a.textContent = `${a.download} (${(blob.size / 1048576).toFixed(1)} MB)`;
+        box.append(a);
+        if (archives.length === 1) a.click();
+      });
+      box.hidden = false;
+    }
     status(
-      `${manifest.role === "test" ? "Test" : "Training"} dataset exported: ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. ${manifest.role === "test" ? "Evaluation images/annotations only; no project backup or duplicate crops." : "Images, crops and shared comparison selections included."}`,
+      `${directory ? `Dataset saved in ${directory.name} inside your selected folder.` : "Dataset prepared; download links are below."} ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. Original images and boundaries included; crops are derived during training.`,
     );
   } catch (error) {
-    status(error.message);
+    status(
+      `Dataset export failed: ${error.message}${directory ? " The new folder may be incomplete; export again to a new folder. Your annotations are unchanged." : " Your annotations are unchanged. Try Save dataset to folder for large experiments."}`,
+    );
   } finally {
     setBusy(false);
     renderFrame();
   }
-};
+}
+$("training").onclick = () => exportDataset(false);
+$("trainingFolder").onclick = () => exportDataset(true);
 
 $("layout").onchange = () => {
   if ($("layout").value === "individual" && project.wells.length > 1) {
@@ -1925,6 +1981,55 @@ $("layout").onchange = () => {
   }
   project.layout = $("layout").value;
   updateContext();
+};
+$("resizeWells").onclick = () => {
+  if (busy || !project.wells.length) return;
+  try {
+    const factor = 1 + Number($("resizePercent").value) / 100;
+    if (factor === 1) return status("Choose a nonzero size adjustment.");
+    // Validate the entire edit before mutating any well.
+    const changes = project.wells.map((w) => ({
+      w,
+      base: C.resizeBoundary(w.points, factor),
+      overrides: Object.fromEntries(
+        Object.entries(w.overrides || {}).map(([i, p]) => [
+          i,
+          C.resizeBoundary(p, factor),
+        ]),
+      ),
+    }));
+    history("resize-well-boundaries", {
+      factor,
+      previous: project.wells.map((w) => ({
+        uid: w.uid,
+        points: w.points,
+        overrides: w.overrides,
+      })),
+    });
+    for (const { w, base, overrides } of changes) {
+      invalidate(w.uid, null);
+      const previousPartial = !!w.detection.partial;
+      w.points = base.points;
+      w.detection.partial = !!w.detection.partial || base.partial;
+      w.detection.review_required = true;
+      w.overrides = Object.fromEntries(
+        Object.entries(overrides).map(([i, p]) => [i, p.points]),
+      );
+      for (const [i, p] of Object.entries(overrides)) {
+        w.partial_frames ||= {};
+        w.partial_frames[i] =
+          (w.partial_frames[i] ?? previousPartial) || p.partial;
+      }
+    }
+    updateDetails();
+    draw();
+    previews();
+    status(
+      `Resized ${changes.length} wells across the sequence. Well IDs and manual annotations are preserved. Check the boundaries, then approve them; affected model predictions were cleared.`,
+    );
+  } catch (error) {
+    status(error.message);
+  }
 };
 function nextMissing(kind) {
   const well = selectedWell();
@@ -2036,7 +2141,7 @@ $("machine").onclick = async () => {
       { name: "recovery.csv", text: C.tableCSV(report.recovery || []) },
       {
         name: "README.txt",
-        text: "Machine analysis retains frame labels, geometry, model confidence/version, manual corrections, timing bounds and complete editable project/history. Use the separate human report for compact results. Training exports additionally contain original images, masked crops and eligible manual targets.",
+        text: "Machine analysis retains frame labels, geometry, model confidence/version, manual corrections, timing bounds and complete editable project/history. Use the separate human report for compact results. Training exports additionally contain original images and eligible manual targets; crops are derived by the loaders.",
       },
     ];
     download(
