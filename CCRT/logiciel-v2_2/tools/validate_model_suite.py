@@ -55,7 +55,7 @@ main(
         "--resnet-batch-size",
         "2",
         "--pose-batch-size",
-        "2",
+        "16",
         "--temporal-batch-size",
         "2",
         "--image-size",
@@ -78,7 +78,7 @@ for path in manifests:
         assert selections[run] == m["selection"]
     selections[run] = m["selection"]
     assert not m["training"]["test_data_used_for_training"]
-    assert m["training"]["batch_size"] == 2
+    assert m["training"]["batch_size"] == (16 if m["architecture"] == "sleap-rf" else 2)
 assert len(selections["all-annotated-wells"]["annotation_ids"]) == 18
 assert len(selections["poor-poses"]["annotation_ids"]) == 6
 with (out / "results/training.csv").open() as stream:
@@ -162,6 +162,26 @@ uncached = torch.load(
     out / "uncached/resnet18/poor-poses/model.pt", map_location="cpu", weights_only=True
 )
 assert all(torch.equal(cached[key], uncached[key]) for key in cached)
+# Observe native forward batches, not just the outer extraction batch metadata.
+import numpy as np
+from backend.services.suite_models import PoseWorker
+from tools.sleap_pose import MODEL_CACHE
+
+worker = PoseWorker(args.pose_model, device="cpu")
+rgb = np.full((64, 64, 3), 128, dtype=np.uint8)
+worker.predict([rgb], ["warmup"])
+native = next(iter(MODEL_CACHE.values()))
+observed = []
+hook = native.register_forward_pre_hook(
+    lambda module, inputs: observed.append(len(inputs[0]))
+)
+try:
+    poses = worker.predict([rgb] * 18, [str(i) for i in range(18)], batch_size=16)
+    assert observed == [16, 2]
+    assert [pose["id"] for pose in poses] == [str(i) for i in range(18)]
+finally:
+    hook.remove()
+    worker.close()
 print(
     "PASS actual ResNet, SLEAP/RF and DeepEthogram flow/two-stream/TGM training; live losses/plots, batch overrides, identical cached/uncached weights, full/poor/rich selections, partial labels, independent evaluation and all nine checkpoint reloads:",
     out,

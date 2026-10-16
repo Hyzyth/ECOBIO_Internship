@@ -326,7 +326,7 @@ def train_model(kind, data, run, out, args):
             for batch, (crops, images) in prefetched(
                 batches, prepare_pose, args.prefetch_batches
             ):
-                poses = worker.predict(images, batch)
+                poses = worker.predict(images, batch, batch_size=batch_size)
                 features.extend(pose_features(p, c[1]) for p, c in zip(poses, crops))
                 completed += len(batch)
                 progress.emit(

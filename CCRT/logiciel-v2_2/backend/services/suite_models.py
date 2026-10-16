@@ -284,10 +284,12 @@ class PoseWorker:
         self.root = Path(model).resolve()
         self.device = device
 
-    def predict(self, images, identities):
+    def predict(self, images, identities, batch_size=8):
         from tools.sleap_pose import infer_images
 
-        return infer_images(self.root, images, identities, device=self.device)
+        return infer_images(
+            self.root, images, identities, device=self.device, batch_size=batch_size
+        )
 
     def close(self):
         from tools.sleap_pose import clear_cache
