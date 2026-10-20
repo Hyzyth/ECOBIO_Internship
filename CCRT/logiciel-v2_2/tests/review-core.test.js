@@ -183,3 +183,98 @@ test("partial boundary status survives export/restore and appears in CSV", () =>
   saved.wells[0].partial_frames[2] = "false";
   assert.throws(() => C.validateProject(saved, p.frames), /partial boundary/);
 });
+
+test("validated recovery requires Coma evidence; unsafe policies abstain without changing raw outputs", () => {
+  const p = project();
+  for (let i = 0; i < 4; i++)
+    p.records[`${i}:a`] = {
+      prediction: i === 1 ? "coma" : "awake",
+      confidence: 0.99,
+      model: { id: "m", version: "1" },
+    };
+  p.recovery_policy = {
+    confidence_threshold: 0.8,
+    awake_consecutive_frames: 2,
+    require_coma_before_awake: true,
+  };
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["0:a"].prediction, "unsure");
+  assert.equal(p.records["0:a"].recovery_status, "no_observed_coma_baseline");
+  assert.equal(p.records["2:a"].prediction, "awake");
+  p.recovery_policy.automatic_confirmation = false;
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["3:a"].prediction, "unsure");
+  assert.equal(p.records["3:a"].raw_prediction, "awake");
+  assert.equal(p.records["3:a"].recovery_status, "policy_not_validated");
+  p.mode = "single";
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["0:a"].prediction, "awake");
+});
+
+test("saved evidence duration follows frame interval and manual override uses explicit observations", () => {
+  const p = project();
+  for (let i = 0; i < 4; i++)
+    p.records[`${i}:a`] = {
+      prediction: i ? "awake" : "coma",
+      confidence: 0.99,
+      model: { id: "m", version: "1" },
+    };
+  p.recovery_policy = {
+    confidence_threshold: 0.8,
+    awake_consecutive_frames: 5,
+    awake_confirmation_seconds: 4,
+    source: "validation",
+  };
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["3:a"].prediction, "awake");
+  assert.equal(p.records["3:a"].recovery_decision.awake_consecutive_frames, 3);
+  p.interval = 1;
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["3:a"].prediction, "unsure");
+  C.applyRecoveryPolicy(p, {
+    confidence_threshold: 0.8,
+    awake_consecutive_frames: 1,
+    source: "manual_override",
+  });
+  assert.equal(p.records["1:a"].prediction, "awake");
+  p.recovery_policy.automatic_confirmation = "yes";
+  assert.throws(() => C.validateProject(p, p.frames), /automatic recovery/);
+});
+
+test("bounded gap inference preserves raw probabilities and manual uncertainty", () => {
+  const p = project();
+  for (let i = 0; i < 4; i++)
+    p.records[`${i}:a`] = {
+      prediction: i === 1 ? "awake" : "coma",
+      confidence: i === 1 || i === 3 ? 0.6 : 0.99,
+      model: { id: "m", version: "1" },
+    };
+  p.records["1:a"].correction = { state: "unknown" };
+  p.recovery_policy = {
+    confidence_threshold: 0.8,
+    awake_consecutive_frames: 2,
+    infer_matching_gaps: true,
+  };
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["1:a"].prediction, "coma");
+  assert.equal(C.effective(p.records["1:a"], p.wells[0]), "unknown");
+  assert.equal(p.records["1:a"].raw_prediction, "awake");
+  assert.equal(p.records["1:a"].raw_confidence, 0.6);
+  assert.equal(p.records["1:a"].confidence, null);
+  assert.equal(p.records["1:a"].temporal_inference.right_frame_index, 2);
+  assert.equal(
+    C.exportProject(p).results[1].temporal_inference.method,
+    "matching_brackets",
+  );
+  assert.equal(p.records["3:a"].prediction, "unsure");
+  const snapshot = JSON.stringify(p.records);
+  C.applyRecoveryPolicy(p);
+  assert.equal(JSON.stringify(p.records), snapshot);
+  p.records["2:a"].analysis_session = "different";
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["1:a"].prediction, "unsure");
+  delete p.records["2:a"].analysis_session;
+  p.records["1:a"].decision_eligible = false;
+  C.applyRecoveryPolicy(p);
+  assert.equal(p.records["1:a"].prediction, "unsure");
+});

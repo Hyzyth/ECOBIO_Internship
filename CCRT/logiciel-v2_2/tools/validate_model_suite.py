@@ -23,7 +23,25 @@ args = p.parse_args()
 out = Path(args.output or tempfile.mkdtemp(prefix="flyscope-suite-"))
 out.mkdir(parents=True, exist_ok=True)
 train, test = grids(out / "fixtures")
-plan = plan_for(TrainingData([train]), 2026, "W1", "W2")
+# One additional annotated individual is reserved for validation across every
+# selection, including one-well training. Test data remain a separate grid.
+import copy
+
+manifest = json.loads((train / "annotations.json").read_text())
+validation_well = manifest["wells"][3]
+for original in list(manifest["annotations"]):
+    if original["well_uid"] != "well-0":
+        continue
+    a = copy.deepcopy(original)
+    a.update(
+        id=f"validation-{a['frame_index']}",
+        well_uid=validation_well["well_uid"],
+        well_id=validation_well["well_id"],
+        boundary_normalized=validation_well["frames"][a["frame_index"]]["points"],
+    )
+    manifest["annotations"].append(a)
+(train / "annotations.json").write_text(json.dumps(manifest))
+plan = plan_for(TrainingData([train]), 2026, "W1", "W2", validation_wells=["W4"])
 (out / "plan.json").write_text(json.dumps(plan, indent=2))
 main(
     [
@@ -79,12 +97,23 @@ for path in manifests:
     selections[run] = m["selection"]
     assert not m["training"]["test_data_used_for_training"]
     assert m["training"]["batch_size"] == (16 if m["architecture"] == "sleap-rf" else 2)
+    assert len(m["validation"]["well_uids"]) == 1
+    assert not set(m["selection"]["well_uids"]) & set(m["validation"]["well_uids"])
+    assert m["recovery_policy"]["require_coma_before_awake"]
+    assert m["recovery_policy"]["infer_matching_gaps"]
+    assert not m["recovery_policy"][
+        "automatic_confirmation"
+    ]  # only one validation individual
+    assert (path.parent / "recovery-policy-search.json").is_file()
 assert len(selections["all-annotated-wells"]["annotation_ids"]) == 18
 assert len(selections["poor-poses"]["annotation_ids"]) == 6
 with (out / "results/training.csv").open() as stream:
     training_rows = list(csv.DictReader(stream))
 epoch_rows = [row for row in training_rows if row["event"] == "epoch"]
 assert len(epoch_rows) == 12  # 3 appearance + 3 * (flow, two-stream, TGM)
+assert all(
+    row["validation_loss"] and float(row["validation_loss"]) >= 0 for row in epoch_rows
+)
 assert len([row for row in training_rows if row["event"] == "batch"]) == 60
 assert (out / "results/loss.png").stat().st_size > 1000
 for path in manifests:

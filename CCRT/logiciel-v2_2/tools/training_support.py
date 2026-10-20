@@ -27,6 +27,12 @@ class Progress:
         "samples",
         "total_samples",
         "loss",
+        "validation_loss",
+        "validation_balanced_accuracy",
+        "validation_coma_recall",
+        "validation_pck_005",
+        "validation_mean_error_px",
+        "validation_peak_coverage",
         "elapsed_s",
         "samples_per_s",
         "input_wait_s",
@@ -136,8 +142,9 @@ def device_tensor(value, device):
 class CropCache:
     """Frame-major preparation once; random-access uint8 memmap during training.
 
-    No labels or fitted statistics are cached. Only selected train wells and
-    their causal context are requested; held-out grids never enter this cache.
+    No labels or fitted statistics are cached. Selected fit/validation wells and their causal context are requested.
+    Validation pixels are cached without labels or gradient updates; test grids
+    never enter this cache.
     A complete marker is published atomically after all arrays are flushed.
     """
 

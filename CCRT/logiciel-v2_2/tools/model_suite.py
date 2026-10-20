@@ -6,14 +6,11 @@ SLEAP pose pretraining runs with the same Python interpreter with tools/sleap_po
 is used for training, threshold selection, early stopping or normalization.
 """
 import argparse
-from collections import Counter
 from functools import lru_cache
-import hashlib
 import json
 import os
 from pathlib import Path
 import random
-import shutil
 import sys
 import tempfile
 import time
@@ -29,32 +26,15 @@ os.environ.setdefault(
 from tools.model_experiments import Dataset, load_plan, check_holdouts, safe_path
 from backend.services.suite_models import (
     CLASSES,
-    PREPROCESSING,
     crop_rgb,
-    make_resnet,
-    make_deepethogram,
     torch_setup,
-    tensor,
-    normalize,
-    frozen_batch_norm,
-    flow_loss,
-    PoseWorker,
-    pose_features,
-    forest_export,
     SuiteModel,
     digest,
-    pose_input,
-    POSE_PREPROCESSING,
-    model_version,
 )
-import numpy as np
-from tools.training_support import (
-    CropCache,
-    Progress,
-    prefetched,
-    host_tensor,
-    device_tensor,
-)
+from backend.services.recovery_policy import apply_policy, effective_policy
+from tools.training_support import CropCache, Progress
+from tools.suite_validation import make_validation, validate_split, resolve_wells
+from tools.suite_training import train_model
 
 
 class TrainingData:
@@ -145,9 +125,32 @@ class TrainingData:
         ]
 
 
-def plan_for(data, seed=2026, poor=None, rich=None):
+def plan_for(
+    data,
+    seed=2026,
+    poor=None,
+    rich=None,
+    validation_fraction=0,
+    validation_wells=None,
+    validation_folds=None,
+    validation_fold=0,
+    validation_unit="well",
+):
     samples = data.annotations
     wells = sorted({data.identity(d, a["well_uid"]) for d, a in samples.values()})
+    protected = resolve_wells(data, [value for value in (poor, rich) if value])
+    validation = make_validation(
+        data,
+        seed,
+        validation_fraction,
+        protected,
+        validation_wells,
+        validation_folds,
+        validation_fold,
+        validation_unit,
+    )
+    if validation:
+        wells = sorted(set(wells) - set(validation["well_uids"]))
     occupied = [w for w in wells if data.occupied[w]]
     runs = []
     skipped = []
@@ -167,7 +170,7 @@ def plan_for(data, seed=2026, poor=None, rich=None):
         )
 
     run("all-annotated-wells", wells, seed)
-    for count, repeats in [(25, 1), (10, 2), (5, 4), (2, 5)]:
+    for count, repeats in [(25, 1), (10, 2), (5, 2), (2, 2)]:
         if len(occupied) < count:
             skipped.append(
                 {
@@ -195,14 +198,15 @@ def plan_for(data, seed=2026, poor=None, rich=None):
         run(name, matching, seed)
     return {
         "kind": "flyscope-suite-plan",
-        "schema_version": 1,
-        "protocol": "full-25x1-10x2-5x4-2x5-poor-rich-v3",
+        "schema_version": 2 if validation else 1,
+        "protocol": "full-25x1-10x2-5x2-2x2-poor-rich-v4",
         "seed": seed,
         "dataset_sha256": [d.sha for d in data.datasets],
         "runs": runs,
         "skipped": skipped,
         "selection_unit": "whole well / single individual for random subsets",
         "test_data_used": False,
+        "validation": validation,
     }
 
 
@@ -238,6 +242,7 @@ def checked_plan(data, path=None, seed=2026, poor=None, rich=None):
     else:
         plan = plan_for(data, seed, poor, rich)
     names = set()
+    validate_split(data, plan)
     for run in plan["runs"]:
         import re
 
@@ -262,523 +267,6 @@ def checked_plan(data, path=None, seed=2026, poor=None, rich=None):
 
 def target(data, identity):
     return CLASSES.index(data.annotations[identity][1]["label"])
-
-
-def train_model(kind, data, run, out, args):
-    import torch
-
-    device = torch_setup(run["seed"], args.device)
-    progress = args.progress
-    batch_size = (
-        getattr(
-            args,
-            {
-                "resnet18": "resnet_batch_size",
-                "sleap-rf": "pose_batch_size",
-                "deepethogram": "temporal_batch_size",
-            }[kind],
-        )
-        or args.batch_size
-    )
-    context = {"architecture": kind, "run": run["id"]}
-    progress.emit(
-        "model_start",
-        force=True,
-        **context,
-        device=str(device),
-        samples=len(run["annotation_ids"]),
-        batch_size=batch_size,
-        gpu=torch.cuda.get_device_name(device) if device.type == "cuda" else None,
-    )
-    ids = run["annotation_ids"]
-    labels = [target(data, k) for k in ids]
-    start = time.monotonic()
-    losses = {}
-    pose_source = None
-    if kind == "sleap-rf":
-        if not args.pose_model:
-            raise ValueError(
-                "SLEAP/RF needs a trained pose model. Run sleap_pose.py train on the creator's SLP dataset first."
-            )
-        from sklearn.ensemble import RandomForestClassifier
-
-        pose_source = Path(args.pose_model).resolve()
-        worker = PoseWorker(pose_source, device=args.device)
-        features = []
-        try:
-            batches = (
-                ids[offset : offset + batch_size]
-                for offset in range(0, len(ids), batch_size)
-            )
-
-            def prepare_pose(batch):
-                crops = [data.sample(k, args.image_size) for k in batch]
-                return crops, [pose_input(c[0]) for c in crops]
-
-            progress.emit(
-                "phase_start",
-                force=True,
-                **context,
-                phase="pose_features",
-                samples=len(ids),
-            )
-            completed = 0
-            for batch, (crops, images) in prefetched(
-                batches, prepare_pose, args.prefetch_batches
-            ):
-                poses = worker.predict(images, batch, batch_size=batch_size)
-                features.extend(pose_features(p, c[1]) for p, c in zip(poses, crops))
-                completed += len(batch)
-                progress.emit(
-                    "pose_features",
-                    **context,
-                    phase="pose_features",
-                    samples=completed,
-                    total_samples=len(ids),
-                )
-        finally:
-            worker.close()
-        progress.emit(
-            "phase_start",
-            force=True,
-            **context,
-            phase="random_forests",
-            device="cpu",
-            trees=args.rf_trees,
-        )
-        forest = RandomForestClassifier(
-            n_estimators=args.rf_trees,
-            random_state=run["seed"],
-            n_jobs=2,
-            class_weight={0: args.false_awake_cost, 1: 1, 2: args.false_awake_cost},
-        )
-        state_indices = [i for i, y in enumerate(labels) if y != 2]
-        if state_indices:
-            forest.fit(
-                np.stack(features)[state_indices], np.asarray(labels)[state_indices]
-            )
-        occupancy = RandomForestClassifier(
-            n_estimators=args.rf_trees,
-            random_state=run["seed"],
-            n_jobs=2,
-            class_weight={0: 1, 2: args.false_awake_cost},
-        )
-        occupancy.fit(
-            np.stack([data.sample(k, args.image_size)[1] for k in ids]),
-            [2 if y == 2 else 0 for y in labels],
-        )
-        payload = {
-            "state": forest_export(forest) if state_indices else None,
-            "occupancy": forest_export(occupancy),
-            "state_features": "normalized keypoint distances, visibility and confidence only",
-            "occupancy_features": "relative foreground components only",
-        }
-    else:
-        network = (
-            make_resnet(args.initialization)
-            if kind == "resnet18"
-            else make_deepethogram(args.window, args.initialization)
-        )
-        network.to(device)
-        weights = torch.tensor(
-            [args.false_awake_cost, 1, args.false_awake_cost],
-            device=device,
-            dtype=torch.float32,
-        )
-        criterion = torch.nn.CrossEntropyLoss(weight=weights)
-
-        def optimize(phase, parameters, epochs, batch_loss, prepare):
-            optimizer = torch.optim.Adam(parameters, lr=args.learning_rate)
-            history = []
-            progress.emit(
-                "phase_start",
-                force=True,
-                **context,
-                phase=phase,
-                epochs=epochs,
-                batch_size=batch_size,
-            )
-            for epoch in range(epochs):
-                order = np.random.default_rng(run["seed"] + epoch).permutation(len(ids))
-                values = []
-                network.train()
-                frozen_batch_norm(network)
-                batches = (
-                    [ids[i] for i in order[offset : offset + batch_size]]
-                    for offset in range(0, len(order), batch_size)
-                )
-                iterator = iter(prefetched(batches, prepare, args.prefetch_batches))
-                epoch_start = time.monotonic()
-                input_wait = 0
-                completed = 0
-                total_batches = (len(ids) + batch_size - 1) // batch_size
-                progress.emit(
-                    "epoch_start",
-                    force=True,
-                    **context,
-                    phase=phase,
-                    epoch=epoch + 1,
-                    epochs=epochs,
-                    batches=total_batches,
-                )
-                try:
-                    for index in range(total_batches):
-                        waiting = time.monotonic()
-                        batch, inputs = next(iterator)
-                        input_wait += time.monotonic() - waiting
-                        optimizer.zero_grad(set_to_none=True)
-                        loss = batch_loss(batch, inputs)
-                        scalar = float(loss.detach())
-                        if not np.isfinite(scalar):
-                            raise RuntimeError(
-                                "Nonfinite training loss; no artifact saved."
-                            )
-                        loss.backward()
-                        optimizer.step()
-                        values.append(scalar)
-                        completed += len(batch)
-                        elapsed = time.monotonic() - epoch_start
-                        gpu = (
-                            {
-                                "gpu_allocated_mib": torch.cuda.memory_allocated(device)
-                                / 1024**2,
-                                "gpu_reserved_mib": torch.cuda.memory_reserved(device)
-                                / 1024**2,
-                            }
-                            if device.type == "cuda"
-                            else {}
-                        )
-                        progress.batch(
-                            **context,
-                            phase=phase,
-                            epoch=epoch + 1,
-                            epochs=epochs,
-                            batch=index + 1,
-                            batches=total_batches,
-                            samples=completed,
-                            total_samples=len(ids),
-                            loss=scalar,
-                            elapsed_s=elapsed,
-                            samples_per_s=completed / max(elapsed, 1e-9),
-                            input_wait_s=input_wait,
-                            eta_s=(len(ids) - completed) * elapsed / completed,
-                            **gpu,
-                        )
-                finally:
-                    iterator.close()
-                history.append(float(np.mean(values)))
-                progress.epoch(
-                    **context,
-                    phase=phase,
-                    epoch=epoch + 1,
-                    epochs=epochs,
-                    loss=history[-1],
-                    elapsed_s=time.monotonic() - epoch_start,
-                    samples=len(ids),
-                    samples_per_s=len(ids) / max(time.monotonic() - epoch_start, 1e-9),
-                    input_wait_s=input_wait,
-                )
-                progress.plot()
-            losses[phase] = history
-
-        def targets(batch):
-            return torch.tensor([target(data, k) for k in batch], device=device)
-
-        if kind == "resnet18":
-            optimize(
-                "appearance",
-                network.parameters(),
-                args.epochs,
-                lambda batch, inputs: criterion(
-                    network(normalize(device_tensor(inputs, device))),
-                    targets(batch),
-                ),
-                lambda batch: host_tensor(
-                    [data.sample(k, args.image_size)[0] for k in batch],
-                    device.type == "cuda",
-                ),
-            )
-        else:
-            if any(
-                d.manifest.get("mode") != "sequence" or len(d.manifest["images"]) < 2
-                for d in data.datasets
-            ):
-                raise ValueError(
-                    "DeepEthogram training requires ordered multi-frame sequences."
-                )
-
-            def prepare_clips(batch):
-                return host_tensor(
-                    [
-                        im
-                        for k in batch
-                        for im in data.clip(k, args.image_size, args.window)
-                    ],
-                    device.type == "cuda",
-                )
-
-            def clips(batch, inputs):
-                return device_tensor(inputs, device).reshape(
-                    len(batch), args.window, 3, args.image_size, args.image_size
-                )
-
-            optimize(
-                "optical_flow",
-                network.motion.parameters(),
-                args.flow_epochs,
-                lambda batch, inputs: flow_loss(network, clips(batch, inputs)),
-                prepare_clips,
-            )
-            network.motion.eval()
-            for p in network.motion.parameters():
-                p.requires_grad = False
-            optimize(
-                "two_stream",
-                [
-                    p
-                    for n, p in network.named_parameters()
-                    if not n.startswith(("motion.", "temporal."))
-                ],
-                args.epochs,
-                lambda batch, inputs: criterion(
-                    network.features(clips(batch, inputs))[1], targets(batch)
-                ),
-                prepare_clips,
-            )
-            network.eval()
-
-            def history_keys(identity):
-                d, a = data.annotations[identity]
-                start_frame = d.manifest.get(
-                    "analysis_start_index", min(data.image_maps[d.sha])
-                )
-                return [
-                    (
-                        d.sha,
-                        max(start_frame, a["frame_index"] - args.window + 1 + i),
-                        a["well_uid"],
-                    )
-                    for i in range(args.window)
-                ]
-
-            keys = sorted({key for k in ids for key in history_keys(k)})
-            indices = {key: i for i, key in enumerate(keys)}
-            starts = {
-                d.sha: d.manifest.get(
-                    "analysis_start_index", min(data.image_maps[d.sha])
-                )
-                for d in data.datasets
-            }
-
-            def prepare_features(batch):
-                return host_tensor(
-                    [
-                        data.rgb(
-                            sha,
-                            max(starts[sha], frame - args.window + 1 + i),
-                            well,
-                            args.image_size,
-                        )[0]
-                        for sha, frame, well in batch
-                        for i in range(args.window)
-                    ],
-                    device.type == "cuda",
-                )
-
-            # Feature extraction was one GPU call per frame/well, with every
-            # feature retained on the GPU. Batch it and keep the fixed features
-            # on disk instead; TGM training now has bounded device memory.
-            progress.emit(
-                "phase_start",
-                force=True,
-                **context,
-                phase="temporal_features",
-                samples=len(keys),
-                batch_size=batch_size,
-            )
-            with tempfile.TemporaryDirectory(
-                prefix="temporal-features-", dir=args.output
-            ) as temporary:
-                if (
-                    shutil.disk_usage(temporary).free
-                    < len(keys) * 1024 * 4 + 16 * 1024**2
-                ):
-                    raise ValueError(
-                        "Not enough free space in --output for temporary temporal features."
-                    )
-                features = np.lib.format.open_memmap(
-                    Path(temporary) / "features.npy",
-                    mode="w+",
-                    dtype=np.float32,
-                    shape=(len(keys), 1024),
-                )
-                try:
-                    batches = (
-                        keys[offset : offset + batch_size]
-                        for offset in range(0, len(keys), batch_size)
-                    )
-                    completed = 0
-                    with torch.no_grad():
-                        for batch, inputs in prefetched(
-                            batches, prepare_features, args.prefetch_batches
-                        ):
-                            values = (
-                                network.features(clips(batch, inputs))[0].cpu().numpy()
-                            )
-                            features[completed : completed + len(batch)] = values
-                            completed += len(batch)
-                            progress.emit(
-                                "temporal_features",
-                                **context,
-                                phase="temporal_features",
-                                samples=completed,
-                                total_samples=len(keys),
-                            )
-                    features.flush()
-
-                    def prepare_temporal(batch):
-                        rows = [indices[key] for k in batch for key in history_keys(k)]
-                        value = torch.from_numpy(
-                            features[rows]
-                            .reshape(len(batch), args.window, 1024)
-                            .transpose(0, 2, 1)
-                            .copy()
-                        )
-                        return value.pin_memory() if device.type == "cuda" else value
-
-                    optimize(
-                        "temporal_tgm",
-                        network.temporal.parameters(),
-                        args.sequence_epochs,
-                        lambda batch, inputs: criterion(
-                            network.temporal(
-                                inputs.to(device, non_blocking=device.type == "cuda")
-                            )[:, :, -1],
-                            targets(batch),
-                        ),
-                        prepare_temporal,
-                    )
-                finally:
-                    features._mmap.close()
-        payload = network.state_dict()
-    out.mkdir(parents=True, exist_ok=False)
-    if kind == "sleap-rf":
-        (out / "forest.json").write_text(json.dumps(payload))
-        shutil.copytree(pose_source, out / "pose")
-    else:
-        torch.save(payload, out / "model.pt")
-    artifacts = {
-        str(p.relative_to(out)): digest(p) for p in out.rglob("*") if p.is_file()
-    }
-    meta = {
-        "kind": "flyscope-suite-model",
-        "architecture": kind,
-        "name": f"{kind} / {run['id']}",
-        "image_size": args.image_size,
-        "window": args.window if kind == "deepethogram" else 1,
-        "requires_sequence": kind == "deepethogram",
-        "preprocessing": PREPROCESSING,
-        "classes": CLASSES,
-        "pose_preprocessing": POSE_PREPROCESSING if kind == "sleap-rf" else None,
-        "selection": run,
-        "class_support": dict(Counter(CLASSES[i] for i in labels)),
-        "training_dataset_sha256": [d.sha for d in data.datasets],
-        "training_experiment_ids": [d.manifest["experiment_id"] for d in data.datasets],
-        "training_image_sha256": sorted(
-            set().union(*(d.image_hashes for d in data.datasets))
-        ),
-        "artifact_hashes": artifacts,
-        "initialization": (
-            args.initialization
-            if kind != "sleap-rf"
-            else "fixed external SLEAP pose model"
-        ),
-        "pose_parent_sha256": (
-            digest(pose_source / "pose.pt") if pose_source else None
-        ),
-        "recovery_policy": {
-            "confidence_threshold": args.confidence_threshold,
-            "awake_consecutive_frames": args.awake_frames,
-        },
-        "training": {
-            "epochs": args.epochs,
-            "flow_epochs": args.flow_epochs,
-            "sequence_epochs": args.sequence_epochs,
-            "rf_trees": args.rf_trees,
-            "seed": run["seed"],
-            "learning_rate": args.learning_rate,
-            "batch_size": batch_size,
-            "false_awake_cost": args.false_awake_cost,
-            "loss": losses,
-            "seconds": time.monotonic() - start,
-            "test_data_used_for_training": False,
-        },
-    }
-    meta["runtime"] = {
-        "python": sys.version.split()[0],
-        "numpy": np.__version__,
-        "torch": str(torch.__version__),
-        "cuda_runtime": torch.version.cuda,
-        "device": str(device),
-        "gpu": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
-        "determinism": (
-            "strict"
-            if device.type == "cpu"
-            else "seeded; unsupported deterministic kernels warn"
-        ),
-    }
-    if kind == "deepethogram":
-        from backend.services.upstream_architectures import WHEEL_SHA256
-
-        meta["upstream_architectures_sha256"] = WHEEL_SHA256
-    meta["version"] = model_version(meta)
-    (out / "model.json").write_text(json.dumps(meta, indent=2))
-    progress.emit(
-        "model_saved",
-        force=True,
-        **context,
-        path=str(out / "model.json"),
-        seconds=time.monotonic() - start,
-    )
-    return out / "model.json"
-
-
-def apply_policy(records, policy):
-    threshold = policy["confidence_threshold"]
-    count = policy["awake_consecutive_frames"]
-    streak = 0
-    confirmed = None
-    onset = None
-    previous = None
-    for index, r in enumerate(records):
-        if previous is not None and r["frame_index"] != previous + 1:
-            streak = 0
-        previous = r["frame_index"]
-        raw = r.get("raw_prediction", r["prediction"])
-        confidence = r["confidence"]
-        r["raw_prediction"] = raw
-        r.setdefault("raw_confidence", confidence)
-        if confirmed is not None:
-            r["prediction"] = "awake"
-            r["confidence"] = None
-        elif confidence is None or confidence < threshold:
-            r["prediction"] = "unsure"
-            streak = 0
-        elif raw == "awake":
-            streak += 1
-            if streak >= count:
-                confirmed = r["frame_index"]
-                onset = records[index - streak + 1]["frame_index"]
-                for candidate in records[index - streak + 1 : index + 1]:
-                    candidate["prediction"] = "awake"
-                    candidate["recovery_confirmed_frame_index"] = confirmed
-                    candidate["recovery_onset_frame_index"] = onset
-            else:
-                r["prediction"] = "unsure"
-        else:
-            streak = 0
-        r["recovery_confirmed_frame_index"] = confirmed
-        r["recovery_onset_frame_index"] = onset
 
 
 def evaluate_model(path, test, device="auto", progress=None):
@@ -880,7 +368,10 @@ def evaluate_model(path, test, device="auto", progress=None):
         if test.manifest.get("mode") == "sequence":
             for uid in {r["well_id"] for r in output}:
                 apply_policy(
-                    [r for r in output if r["well_id"] == uid], meta["recovery_policy"]
+                    [r for r in output if r["well_id"] == uid],
+                    effective_policy(
+                        meta["recovery_policy"], test.manifest.get("interval")
+                    ),
                 )
         else:
             for r in output:
@@ -893,6 +384,9 @@ def evaluate_model(path, test, device="auto", progress=None):
                     r["prediction"] = "unsure"
         result = {
             "model": meta,
+            "applied_recovery_policy": effective_policy(
+                meta["recovery_policy"], test.manifest.get("interval")
+            ),
             "test_dataset_sha256": test.sha,
             "test_experiment": test.manifest["experiment_id"],
             "metrics": metrics(output, test.manifest),
@@ -924,9 +418,18 @@ def main(argv=None):
     planning = sub.add_parser("plan")
     planning.add_argument("--train", nargs="+", required=True)
     planning.add_argument("--output", required=True)
-    planning.add_argument("--seed", type=int, default=2026)
+    planning.add_argument("--seed", type=int)
     planning.add_argument("--poor-well")
     planning.add_argument("--rich-well")
+    planning.add_argument(
+        "--source-plan",
+        help="Existing export plan: inherit its seed and poor/rich individuals, then create a NEW validation-aware plan",
+    )
+    planning.add_argument("--validation-fraction", type=float, default=0.2)
+    planning.add_argument("--validation-wells", nargs="+")
+    planning.add_argument("--validation-unit", choices=["well", "grid"], default="well")
+    planning.add_argument("--validation-folds", type=int)
+    planning.add_argument("--validation-fold", type=int, default=0)
     compare = sub.add_parser("compare")
     compare.add_argument("--train", nargs="+", required=True)
     compare.add_argument("--plan")
@@ -982,8 +485,37 @@ def main(argv=None):
     )
     compare.add_argument("--rf-trees", type=int, default=200)
     compare.add_argument("--false-awake-cost", type=float, default=2)
+    compare.add_argument(
+        "--policy",
+        choices=["auto", "manual"],
+        default="auto",
+        help="Choose recovery settings on reserved validation wells (default), or use explicit manual settings",
+    )
     compare.add_argument("--confidence-threshold", type=float, default=0.8)
     compare.add_argument("--awake-frames", type=int, default=3)
+    compare.add_argument(
+        "--allow-initial-awake",
+        action="store_true",
+        help="Allow recovery confirmation without a preceding confident Coma observation (left-censored inputs)",
+    )
+    compare.add_argument(
+        "--allow-no-validation",
+        action="store_true",
+        help="Explicit legacy/software-smoke opt-out; no early stopping or generalization estimate",
+    )
+    compare.add_argument(
+        "--balance", choices=["well-class", "class", "none"], default="well-class"
+    )
+    compare.add_argument(
+        "--patience",
+        type=int,
+        default=3,
+        help="Validation epochs without improvement before stopping; 0 disables early stopping",
+    )
+    compare.add_argument("--min-delta", type=float, default=0.0001)
+    compare.add_argument("--weight-decay", type=float, default=0.0001)
+    compare.add_argument("--rf-min-samples-leaf", type=int, default=5)
+    compare.add_argument("--rf-max-depth", type=int, default=12)
     score = sub.add_parser("evaluate")
     score.add_argument("--models", nargs="+", required=True)
     for parser in [compare, score]:
@@ -1012,7 +544,32 @@ def main(argv=None):
     announce("starting", force=True, command=args.command, output=args.output)
     if args.command == "plan":
         data = TrainingData(args.train, announce)
-        plan = plan_for(data, args.seed, args.poor_well, args.rich_well)
+        poor, rich, seed = (
+            args.poor_well,
+            args.rich_well,
+            args.seed if args.seed is not None else 2026,
+        )
+        if args.source_plan:
+            source = checked_plan(data, args.source_plan)
+            seed = args.seed if args.seed is not None else source["seed"]
+            for run in source["runs"]:
+                if run["id"] == "poor-poses" and poor is None:
+                    poor = run["well_uids"][0]
+                if run["id"] == "rich-poses" and rich is None:
+                    rich = run["well_uids"][0]
+        plan = plan_for(
+            data,
+            seed,
+            poor,
+            rich,
+            args.validation_fraction,
+            args.validation_wells,
+            args.validation_folds,
+            args.validation_fold,
+            args.validation_unit,
+        )
+        if args.source_plan:
+            plan["source_plan_sha256"] = digest(args.source_plan)
         out = Path(args.output)
         if out.exists():
             raise ValueError(
@@ -1046,6 +603,11 @@ def main(argv=None):
             or args.false_awake_cost < 1
             or args.cache_workers < 1
             or args.prefetch_batches < 0
+            or args.patience < 0
+            or args.min_delta < 0
+            or args.weight_decay < 0
+            or args.rf_min_samples_leaf < 1
+            or args.rf_max_depth < 1
             or any(
                 value is not None and value < 1
                 for value in (
@@ -1074,6 +636,11 @@ def main(argv=None):
             raise ValueError("Requested run is not in the shared plan.")
         if not selected:
             raise ValueError("No shared runs selected.")
+        args.validation = plan.get("validation")
+        if not args.validation and not args.allow_no_validation:
+            raise ValueError(
+                "This plan has no independent validation wells. Create a NEW plan with `model_suite.py plan --source-plan ORIGINAL_PLAN --validation-fraction 0.2 ...`. Use --allow-no-validation only for an explicitly unvalidated legacy run or software smoke test."
+            )
         if "sleap-rf" in args.architectures and not args.pose_model:
             raise ValueError(
                 "Train the external SLEAP pose model first, then provide --pose-model."
@@ -1090,13 +657,26 @@ def main(argv=None):
             force=True,
             command=args.command,
             output=str(out),
-            arguments=vars(args) | {"progress": None},
+            arguments={
+                k: v
+                for k, v in vars(args).items()
+                if k not in ("progress", "validation")
+            },
         )
         if args.command == "compare":
             (out / "comparison-plan.json").write_text(json.dumps(plan, indent=2))
             # Fail before a costly cache build if requested CUDA is unavailable.
             device = torch_setup(args.seed, args.device)
             progress.emit("device_ready", force=True, device=str(device))
+            progress.emit(
+                "validation_split" if args.validation else "warning_no_validation",
+                force=True,
+                validation={
+                    k: v
+                    for k, v in (args.validation or {}).items()
+                    if k != "annotation_ids"
+                },
+            )
             progress.emit(
                 "suite_start",
                 force=True,
@@ -1107,7 +687,12 @@ def main(argv=None):
             if not args.no_cache:
                 data.cache = CropCache.prepare(
                     data,
-                    selected,
+                    selected
+                    + (
+                        [{"annotation_ids": args.validation["annotation_ids"]}]
+                        if args.validation
+                        else []
+                    ),
                     args.image_size,
                     (
                         2 * (args.window - 1)

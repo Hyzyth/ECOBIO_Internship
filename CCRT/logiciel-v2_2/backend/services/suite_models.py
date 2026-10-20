@@ -272,9 +272,31 @@ def model_version(meta):
         "initialization",
         "pose_parent_sha256",
     ]
+    if "pose_quality_policy" in meta:
+        keys.append("pose_quality_policy")
     return hashlib.sha256(
         json.dumps({k: meta.get(k) for k in keys}, sort_keys=True).encode()
     ).hexdigest()
+
+
+POSE_QUALITY_POLICY = {
+    "minimum_visible_keypoints": 2,
+    "minimum_spread_fraction": 0.05,
+    "note": "Reject absent/collapsed poses; this is a screening rule, not proof of anatomical accuracy.",
+}
+
+
+def usable_pose(pose, policy=POSE_QUALITY_POLICY):
+    visible = [p for p in pose["points"] if p["visible"]]
+    spread = (
+        np.ptp([[p["x"], p["y"]] for p in visible], axis=0).max()
+        if len(visible) > 1
+        else 0
+    )
+    return (
+        len(visible) >= policy["minimum_visible_keypoints"]
+        and spread >= policy["minimum_spread_fraction"]
+    )
 
 
 class PoseWorker:
@@ -378,6 +400,7 @@ class SuiteModel:
             raise ValueError("Unreadable model image.")
         images = []
         foreground = []
+        unreliable_pose = [False] * len(wells)
         for well in wells:
             im, feature = crop_rgb(image, well["points"], self.size)
             images.append(im)
@@ -386,6 +409,9 @@ class SuiteModel:
             poses = self.pose.predict(
                 [pose_input(im) for im in images], [w["id"] for w in wells]
             )
+            quality = self.meta.get("pose_quality_policy")
+            if quality:
+                unreliable_pose = [not usable_pose(p, quality) for p in poses]
             occupancy = forest_probabilities(self.forest["occupancy"], foreground)
             states = (
                 forest_probabilities(
@@ -465,7 +491,7 @@ class SuiteModel:
             while len(self.sessions) > 4:
                 self.sessions.popitem(last=False)
         records = []
-        for well, p in zip(wells, probabilities):
+        for well, p, bad_pose in zip(wells, probabilities, unreliable_pose):
             if (
                 not np.isfinite(p).all()
                 or (p < 0).any()
@@ -473,11 +499,19 @@ class SuiteModel:
             ):
                 raise RuntimeError("Nonfinite or invalid model probabilities.")
             prediction = CLASSES[int(p.argmax())]
+            abstain = bool(well.get("partial")) or (bad_pose and prediction != "empty")
             records.append(
                 {
                     "well_id": well["id"],
-                    "prediction": "unknown" if well.get("partial") else prediction,
-                    "confidence": None if well.get("partial") else float(p.max()),
+                    "boundary_partial": bool(well.get("partial", False)),
+                    "decision_eligible": not abstain,
+                    "abstention_reason": (
+                        "partial_boundary"
+                        if well.get("partial")
+                        else "unusable_pose" if abstain else None
+                    ),
+                    "prediction": "unknown" if abstain else prediction,
+                    "confidence": None if abstain else float(p.max()),
                     "state_probabilities": dict(zip(CLASSES, map(float, p))),
                     "raw_prediction": prediction,
                     "raw_confidence": float(p.max()),

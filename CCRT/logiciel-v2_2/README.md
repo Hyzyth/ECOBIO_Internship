@@ -147,7 +147,7 @@ Annotate only the wells/frames you need. Unannotated wells are omitted from targ
 Before exporting a training ZIP, set the shared seed and optionally the poor/rich-pose **Well IDs**. No special annotation notes are required. `comparison-plan.json` saves actual well UIDs, annotation IDs and seeds for:
 
 - All eligible annotated wells.
-- 1 run of 25 random individuals, 2 of 10, 4 of 5 and 5 of 2. Empty wells are retained in the full selection and excluded from random individual budgets.
+- 1 run of 25 random individuals, 2 of 10, 2 of 5 and 2 of 2. Empty wells are retained in the full selection and excluded from random individual budgets.
 - One run for each manually chosen poor/rich-pose well.
 
 Each selection includes all eligible labels of its selected wells. Oversized budgets are explicitly skipped. Repetitions are independently seeded; subsets may overlap or repeat when the pool is small, and their exact IDs are saved. Every model reads the **same plan**; the plan is cryptographically bound to its exported manifest. Every run starts from its parent model, rather than continuing the previous run. Runs with no coma/awake labels are explicitly skipped because the supplied binary CNN cannot update from Empty alone. Missing classes in a small subset are not filled using other wells or test images.
@@ -179,3 +179,5 @@ Unzip each dataset and run from `CCRT/logiciel-v2_2`:
 To select trained artifacts in the app, set `FLYSCOPE_MODELS_DIR` to the comparison output directory before restarting Flask. Sidecars are discovered recursively and checked against the model hash/preprocessing contract. Keep datasets, generated weights and research results outside Git. This legacy trainer implements the two original Keras architectures. The new three-family suite uses `tools/model_suite.py` and `FLYSCOPE_SUITE_MODELS_DIR`; see [WORKFLOW.md](WORKFLOW.md).
 
 With the server running, `tests/experiments-browser.cjs` checks actual partial-grid training/test ZIPs, fixed selections, model predictions, supervised Empty exports and the single-well limit. `tests/test_experiment_data.py` checks held-out group/hash separation, immutable sample membership and scoring only annotated wells. The supplied crop labels and synthetic workflow checks do not establish out-of-sample biological accuracy.
+
+Training changes and the first experiment audit: [TRAINING_REVIEW.md](TRAINING_REVIEW.md). Code ownership and artifact map: [MAINTAINING.md](MAINTAINING.md). New comparisons require independent validation wells; create a new validation plan as shown in the workflow. Existing annotations and checkpoints stay readable.

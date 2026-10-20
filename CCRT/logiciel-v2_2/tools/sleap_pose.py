@@ -87,7 +87,8 @@ def centered_examples(labels, size):
     nodes = data.skeletons[0].node_names
     examples = []
     image_cache = {}
-    for frame in data.labeled_frames:
+    video_hashes = {str(v.filename): sha(v.filename) for v in data.videos}
+    for label_record, frame in enumerate(data.labeled_frames):
         if not frame.user_instances:
             continue
         key = (frame.video.filename, frame.frame_idx)
@@ -121,8 +122,10 @@ def centered_examples(labels, size):
                     visible,
                     {
                         "video": str(frame.video.filename),
+                        "video_sha256": video_hashes[str(frame.video.filename)],
                         "frame": frame.frame_idx,
                         "instance": n,
+                        "label_record": label_record,
                     },
                 )
             )
@@ -137,6 +140,16 @@ def train(args):
     import torch
     from importlib.metadata import version
     from backend.services.suite_models import torch_setup, tensor
+    from tools.pose_quality import (
+        split_examples,
+        heatmap_targets,
+        heatmap_loss,
+        augment_example,
+        evaluate,
+        write_overlays,
+    )
+    from tools.suite_validation import BestCheckpoint
+    from tools.training_support import Progress
 
     device = torch_setup(args.seed, args.device)
 
@@ -154,6 +167,38 @@ def train(args):
             : args.max_examples
         ]
         examples = [examples[i] for i in order]
+    validation_examples = []
+    validation_split = None
+    if not args.allow_no_validation:
+        examples, validation_examples, validation_split = split_examples(
+            examples, args.validation_fraction, args.seed, args.validation_gap_frames
+        )
+        if parent:
+            parent_hashes = {
+                v["path"]: v["sha256"] for v in parent.get("source_videos", [])
+            }
+
+            def identity(record):
+                content = record.get("video_sha256") or parent_hashes.get(
+                    record["video"]
+                )
+                if content is None:
+                    matches = {
+                        v["sha256"]
+                        for v in parent.get("source_videos", [])
+                        if v["path"].replace("\\", "/").split("/")[-1]
+                        == record["video"].replace("\\", "/").split("/")[-1]
+                    }
+                    content = (
+                        next(iter(matches)) if len(matches) == 1 else record["video"]
+                    )
+                return content, record["frame"]
+
+            seen = {identity(e) for e in parent.get("examples", [])}
+            if any(identity(e[3]) in seen for e in validation_examples):
+                raise ValueError(
+                    "The parent pose model already trained on proposed validation frames. Use untouched anatomical labels or retain its original grouped split; otherwise this is not independent validation."
+                )
     config = {"size": args.size, "filters": args.filters, "nodes": nodes}
     model = network(config).to(device)
     if parent:
@@ -170,75 +215,172 @@ def train(args):
             )
         )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    yy, xx = np.mgrid[: args.size, : args.size]
-    losses = []
-    model.train()
-    for epoch in range(args.epochs):
-        epoch_loss = []
-        order = np.random.default_rng(args.seed + epoch).permutation(len(examples))
-        for offset in range(0, len(order), args.batch_size):
-            batch = [examples[i] for i in order[offset : offset + args.batch_size]]
-            x = tensor([e[0] for e in batch], device)
-            targets, weights = [], []
-            for _, points, visible, _ in batch:
-                heatmaps = np.exp(
-                    -(
-                        (xx[..., None] - np.nan_to_num(points[:, 0])) ** 2
-                        + (yy[..., None] - np.nan_to_num(points[:, 1])) ** 2
-                    )
-                    / (2 * args.sigma**2)
-                )
-                targets.append(heatmaps)
-                weights.append(visible.astype(np.float32))
-            target = torch.as_tensor(
-                np.stack(targets).transpose(0, 3, 1, 2).copy(),
-                dtype=torch.float32,
-                device=device,
-            )
-            mask = torch.as_tensor(
-                np.stack(weights)[:, :, None, None], dtype=torch.float32, device=device
-            )
-            optimizer.zero_grad(set_to_none=True)
-            predicted = model(x)
-            loss = ((predicted - target).square() * mask).sum() / (
-                mask.sum() * args.size**2
-            )
-            value = float(loss.detach().cpu())
-            if not np.isfinite(value):
-                raise RuntimeError("Nonfinite pose loss; no artifact saved.")
-            loss.backward()
-            optimizer.step()
-            epoch_loss.append(value)
-        losses.append(float(np.mean(epoch_loss)))
-        print(json.dumps({"pose_epoch": epoch + 1, "loss": losses[-1]}), flush=True)
+    losses, validation_history = [], []
+    best = BestCheckpoint(args.patience, min_delta=1e-8)
     out.mkdir(parents=True)
-    weights = out / "pose.pt"
-    torch.save(model.state_dict(), weights)
-    meta = {
-        "kind": "flyscope-sleap-pose",
-        "framework": "pytorch",
-        "sleap_nn_version": version("sleap-nn"),
-        "device": str(device),
-        "architecture": "SLEAP UNet / single-instance anatomical confidence maps",
-        "configuration": config,
-        "weights_sha256": sha(weights),
-        "source_labels_sha256": sha(args.labels),
-        "source_labels": str(Path(args.labels).resolve()),
-        "source_videos": [
-            {"path": str(v.filename), "sha256": sha(v.filename)} for v in data.videos
-        ],
-        "examples": [e[3] for e in examples],
-        "seed": args.seed,
-        "epochs": args.epochs,
-        "learning_rate": args.learning_rate,
-        "sigma": args.sigma,
-        "loss": losses,
-        "preprocessing": "centered-square-rgb-0-1-v1",
-        "behavior_labels_used": False,
-    }
-    meta["parent_weights_sha256"] = parent["weights_sha256"] if parent else None
-    (out / "pose.json").write_text(json.dumps(meta, indent=2))
-    return meta
+    progress = Progress(out)
+    try:
+        progress.emit(
+            "pose_split",
+            force=True,
+            training_examples=len(examples),
+            validation_examples=len(validation_examples),
+            split_unit=(validation_split or {}).get("unit"),
+        )
+        for epoch in range(args.epochs):
+            model.train()
+            epoch_loss = []
+            order = np.random.default_rng(args.seed + epoch).permutation(len(examples))
+            for offset in range(0, len(order), args.batch_size):
+                batch = [examples[i] for i in order[offset : offset + args.batch_size]]
+                if not args.no_augmentation:
+                    batch = [
+                        augment_example(
+                            e,
+                            np.random.default_rng(
+                                args.seed + epoch * len(examples) + int(i)
+                            ),
+                        )
+                        for e, i in zip(batch, order[offset : offset + args.batch_size])
+                    ]
+                x = tensor([e[0] for e in batch], device)
+                target, mask = heatmap_targets(batch, args.size, args.sigma, device)
+                optimizer.zero_grad(set_to_none=True)
+                loss = heatmap_loss(model(x), target, mask)
+                value = float(loss.detach().cpu())
+                if not np.isfinite(value):
+                    raise RuntimeError("Nonfinite pose loss; no artifact saved.")
+                loss.backward()
+                optimizer.step()
+                epoch_loss.append(value)
+                progress.batch(
+                    architecture="sleap-pose",
+                    run="anatomical-labels",
+                    phase="pose",
+                    epoch=epoch + 1,
+                    epochs=args.epochs,
+                    batch=offset // args.batch_size + 1,
+                    batches=(len(order) + args.batch_size - 1) // args.batch_size,
+                    loss=value,
+                    samples=min(offset + args.batch_size, len(order)),
+                    total_samples=len(order),
+                )
+            losses.append(float(np.mean(epoch_loss)))
+            values = {}
+            stop = False
+            if validation_examples:
+                metrics, _ = evaluate(
+                    model,
+                    validation_examples,
+                    config,
+                    device,
+                    args.batch_size,
+                    sigma=args.sigma,
+                )
+                validation_history.append(metrics)
+                values = {
+                    "validation_loss": metrics["balanced_heatmap_loss"],
+                    "validation_pck_005": metrics["pck_005"],
+                    "validation_mean_error_px": metrics["mean_error_px"],
+                    "validation_peak_coverage": metrics["visible_prediction_coverage"],
+                }
+                selection_score = (1 - metrics["pck_005"]) * metrics[
+                    "visible_targets"
+                ] + min(0.499999, metrics["mean_error_px"] / args.size / 4)
+                stop = best.update(selection_score, epoch + 1, model)
+            progress.epoch(
+                architecture="sleap-pose",
+                run="anatomical-labels",
+                phase="pose",
+                epoch=epoch + 1,
+                epochs=args.epochs,
+                loss=losses[-1],
+                **values,
+            )
+            progress.plot()
+            if stop:
+                progress.emit(
+                    "early_stopping",
+                    force=True,
+                    selected_epoch=best.epoch,
+                    monitor="highest held-out PCK@0.05; mean pixel error breaks ties",
+                )
+                break
+        best.restore(model)
+        if validation_examples:
+            metrics, predictions = evaluate(
+                model,
+                validation_examples,
+                config,
+                device,
+                args.batch_size,
+                sigma=args.sigma,
+            )
+            write_overlays(
+                validation_examples, predictions, nodes, out / "pose-validation"
+            )
+            (out / "pose-validation/metrics.json").write_text(
+                json.dumps(metrics, indent=2)
+            )
+            (out / "pose-validation/split.json").write_text(
+                json.dumps(validation_split, indent=2)
+            )
+            progress.emit("pose_validation", force=True, **metrics)
+        progress.emit("training_complete", force=True, selected_epoch=best.epoch)
+        weights = out / "pose.pt"
+        torch.save(model.state_dict(), weights)
+        meta = {
+            "kind": "flyscope-sleap-pose",
+            "framework": "pytorch",
+            "sleap_nn_version": version("sleap-nn"),
+            "device": str(device),
+            "architecture": "SLEAP UNet / single-instance anatomical confidence maps",
+            "configuration": config,
+            "weights_sha256": sha(weights),
+            "source_labels_sha256": sha(args.labels),
+            "source_labels": str(Path(args.labels).resolve()),
+            "source_videos": [
+                {"path": str(v.filename), "sha256": sha(v.filename)}
+                for v in data.videos
+            ],
+            "examples": [e[3] for e in examples],
+            "seed": args.seed,
+            "epochs": args.epochs,
+            "learning_rate": args.learning_rate,
+            "sigma": args.sigma,
+            "loss": losses,
+            "loss_method": "foreground-background-balanced-mse-v2",
+            "validation": (
+                {
+                    "split": validation_split,
+                    "epochs": validation_history,
+                    "selected_epoch": best.epoch,
+                    "monitor": "highest held-out PCK@0.05; mean pixel error breaks ties",
+                }
+                if validation_examples
+                else None
+            ),
+            "augmentation": (
+                "in-plane quarter rotations" if not args.no_augmentation else "none"
+            ),
+            "preprocessing": "centered-square-rgb-0-1-v1",
+            "behavior_labels_used": False,
+        }
+        meta["parent_weights_sha256"] = parent["weights_sha256"] if parent else None
+        (out / "pose.json").write_text(json.dumps(meta, indent=2))
+        progress.emit(
+            "complete", force=True, output=str(out), selected_epoch=best.epoch
+        )
+        return meta
+    except BaseException as error:
+        progress.emit(
+            "interrupted" if isinstance(error, KeyboardInterrupt) else "failed",
+            force=True,
+            error=str(error),
+        )
+        raise
+    finally:
+        progress.close()
 
 
 def infer_images(
@@ -328,6 +470,15 @@ def main():
     t.add_argument("--learning-rate", type=float, default=0.001)
     t.add_argument("--sigma", type=float, default=3)
     t.add_argument("--max-examples", type=int)
+    t.add_argument("--validation-fraction", type=float, default=0.2)
+    t.add_argument("--validation-gap-frames", type=int, default=10)
+    t.add_argument(
+        "--allow-no-validation",
+        action="store_true",
+        help="Explicit software-smoke opt-out; not a pose quality estimate",
+    )
+    t.add_argument("--patience", type=int, default=5)
+    t.add_argument("--no-augmentation", action="store_true")
     t.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     t.add_argument(
         "--parent",
@@ -351,6 +502,9 @@ def main():
             or args.size % 8
             or args.filters < 1
             or args.sigma <= 0
+            or args.patience < 0
+            or not 0 < args.validation_fraction < 1
+            or args.validation_gap_frames < 0
         ):
             p.error(
                 "Use positive training parameters and an image size divisible by 8."

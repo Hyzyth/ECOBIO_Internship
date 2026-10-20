@@ -142,9 +142,17 @@
             <summary>Optional model predictions</summary>
             <label>Model<select id="model"></select></label>
             <p id="modelInfo" class="hint"></p>
-            <label data-ccrt>Minimum decision confidence<input id="decisionThreshold" type="number" min="0.5" max="1" step="0.05" value="0.8" /></label>
-            <label data-sequence>Consecutive awake frames to confirm recovery<input id="awakeFrames" type="number" min="1" max="100" step="1" value="3" /></label>
-            <p class="hint" data-ccrt>Weak evidence is Unsure. In a sequence, confirmed Awake decisions remain Awake to the end; raw outputs stay in the machine report. Set these before evaluation, using training/validation data.</p>
+            <label class="check" data-ccrt><input id="useModelPolicy" type="checkbox" checked /> Use the model’s saved recovery settings</label>
+            <p id="policyInfo" class="hint" data-ccrt></p>
+            <details id="manualPolicyOptions" data-ccrt hidden>
+              <summary>Advanced: override recovery settings</summary>
+              <label>Minimum decision confidence<input id="decisionThreshold" type="number" min="0.5" max="1" step="0.01" value="0.8" /></label>
+              <label data-sequence>Consecutive awake observations<input id="awakeFrames" type="number" min="1" max="100" step="1" value="3" /></label>
+              <label class="check" data-sequence><input id="requireComaBaseline" type="checkbox" checked /> Require observed Coma before confirming recovery</label>
+              <label class="check" data-sequence><input id="inferMatchingGaps" type="checkbox" checked /> Infer uncertain gaps bounded by matching states</label>
+              <p class="hint">Manual overrides are experimental settings. Choose them using validation data, before evaluating a test grid.</p>
+            </details>
+            <p class="hint" data-sequence>Recovery settings are selected on held-out validation individuals during training. If no reliable settings are found, automatic recovery stays Unsure. Confirmed Awake remains Awake to the end; raw outputs and manual annotations remain separate.</p>
             <button id="analyze">Analyze sequence</button>
           </details>
           <button id="reviewContinue" class="workflow-next" data-next-step>Continue to export →</button>
@@ -165,7 +173,7 @@
               <label>Shared seed<input id="comparisonSeed" type="number" min="0" max="4294967295" step="1" value="2026" /></label>
               <label>Poor-pose well ID (optional)<input id="poorWell" placeholder="e.g. W3" /></label>
               <label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label>
-              <p class="hint">Every model uses the same saved selections: one full annotated grid (including Empty); 1 × 25, 2 × 10, 4 × 5 and 5 × 2 single-individual wells; one poor-pose and one rich-pose well. Up to 15 runs per model. Oversized budgets are skipped. Unannotated wells are never negative targets. Previously saved plans still work in the training tools.</p>
+              <p class="hint">Every model uses the same saved selections: one full annotated grid (including Empty); 1 × 25, 2 × 10, 2 × 5 and 2 × 2 single-individual wells; one poor-pose and one rich-pose well. Up to 10 runs per model. Oversized budgets are skipped. Unannotated wells are never negative targets. Previously saved plans still work in the training tools.</p>
             </details>
             <p id="datasetHint" class="hint"></p>
             <button id="training" class="secondary">Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP</button>

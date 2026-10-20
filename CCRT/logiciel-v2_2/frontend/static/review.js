@@ -46,6 +46,41 @@ const visibleWells = () =>
     : project.wells.filter((w) => C.activeWell(w, index));
 const selectedWell = () => visibleWells().find((w) => w.uid === selected);
 const record = () => project.records[C.key(index, selected)] || {};
+function selectedRecoveryPolicy() {
+  const modelPolicy = models.find(
+    (m) => m.id === $("model").value,
+  )?.recovery_policy;
+  if ($("useModelPolicy").checked && modelPolicy)
+    return structuredClone(modelPolicy);
+  return {
+    confidence_threshold: Number($("decisionThreshold").value),
+    awake_consecutive_frames: Number($("awakeFrames").value),
+    require_coma_before_awake: $("requireComaBaseline").checked,
+    automatic_confirmation: true,
+    source: "manual_override",
+    infer_matching_gaps: $("inferMatchingGaps").checked,
+  };
+}
+function updatePolicyControls() {
+  const policy = project.recovery_policy || selectedRecoveryPolicy();
+  $("decisionThreshold").value = policy.confidence_threshold;
+  $("awakeFrames").value = policy.awake_consecutive_frames;
+  $("requireComaBaseline").checked = policy.require_coma_before_awake ?? false;
+  $("inferMatchingGaps").checked = policy.infer_matching_gaps ?? false;
+  $("manualPolicyOptions").hidden = $("useModelPolicy").checked;
+  if (policy.source === "validation") {
+    $("policyInfo").textContent =
+      policy.automatic_confirmation === false
+        ? "Automatic recovery could not be validated. Awake decisions stay Unsure; inspect raw predictions and annotate manually. " +
+          (policy.selection?.message ||
+            "No candidate met the validation criteria.")
+        : `Selected on validation individuals: ${Math.round(policy.confidence_threshold * 100)}% confidence; ${policy.awake_confirmation_seconds != null ? policy.awake_confirmation_seconds + " seconds of sustained evidence" : policy.awake_consecutive_frames + " consecutive observations"}. Test grids were not used to choose these settings.`;
+  } else {
+    $("policyInfo").textContent = $("useModelPolicy").checked
+      ? "Stored model settings. This older model has no automatic validation selection; retrain with the updated workflow to obtain it."
+      : "Manual recovery settings override the model’s recommendations.";
+  }
+}
 function history(action, details) {
   project.history.push({ at: new Date().toISOString(), action, ...details });
 }
@@ -435,10 +470,10 @@ function updateDetails() {
   const state =
     study === "ccrt" ? C.effective(r, w).toUpperCase() : "EGG COUNT";
   $("prediction").textContent = w
-    ? `${w.id} · ${state}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${r.correction ? " · Manual annotation applied" : ""}${r.confidence == null ? "" : " · Model confidence: " + Math.round(r.confidence * 100) + "%"}${C.boundaryNeedsReview(w, index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
+    ? `${w.id} · ${state}${study === "eggs" ? " · Eggs: " + (r.correction?.egg_count ?? r.egg_count ?? "Not counted") : ""}${r.correction ? " · Manual annotation applied" : r.temporal_inference ? " · Inferred between matching frames" : ""}${r.confidence == null ? "" : " · Model confidence: " + Math.round(r.confidence * 100) + "%"}${C.boundaryNeedsReview(w, index) ? " · Boundary needs review" : ""}${(w.partial_frames?.[index] ?? w.detection.partial) ? " · Partially visible well" : ""}`
     : "No well selected.";
   $("predictionInfo").textContent = r.model
-    ? `${r.model.name} · Version: ${r.model.version} · Model state: ${(r.prediction || "unknown").toUpperCase()} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.raw_prediction ? " · Raw state: " + r.raw_prediction.toUpperCase() + " · Raw confidence: " + (r.raw_confidence == null ? "Not available" : Math.round(r.raw_confidence * 100) + "%") : ""}${r.recovery_decision?.confirmed_frame_index != null ? " · Recovery starts at frame " + (r.recovery_decision.onset_frame_index + 1) + ", confirmed at frame " + (r.recovery_decision.confirmed_frame_index + 1) : ""}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}`
+    ? `${r.model.name} · Version: ${r.model.version} · Model state: ${(r.prediction || "unknown").toUpperCase()} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.raw_prediction ? " · Raw state: " + r.raw_prediction.toUpperCase() + " · Raw confidence: " + (r.raw_confidence == null ? "Not available" : Math.round(r.raw_confidence * 100) + "%") : ""}${r.recovery_decision?.confirmed_frame_index != null ? " · Recovery starts at frame " + (r.recovery_decision.onset_frame_index + 1) + ", confirmed at frame " + (r.recovery_decision.confirmed_frame_index + 1) : ""}${r.temporal_inference ? " · Inferred between frames " + (r.temporal_inference.left_frame_index + 1) + " and " + (r.temporal_inference.right_frame_index + 1) + "; not a direct confident prediction" : ""}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}`
     : "";
   renderSummary();
   updateContext();
@@ -607,10 +642,7 @@ async function loadFiles(input) {
       ? Number($("sourceFirstFrame").value)
       : null,
     species: $("gridSpecies").value.trim(),
-    recovery_policy: {
-      confidence_threshold: Number($("decisionThreshold").value),
-      awake_consecutive_frames: Number($("awakeFrames").value),
-    },
+    recovery_policy: selectedRecoveryPolicy(),
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
@@ -715,6 +747,9 @@ function setBusy(value) {
     "wellSpecies",
     "decisionThreshold",
     "awakeFrames",
+    "requireComaBaseline",
+    "useModelPolicy",
+    "inferMatchingGaps",
   ].forEach((id) => ($(id).disabled = value));
   $("cancel").hidden = !value;
   $("progress").hidden = !value;
@@ -1076,10 +1111,7 @@ $("mode").onchange = () => {
       ? Number($("sourceFirstFrame").value)
       : null,
     species: $("gridSpecies").value.trim(),
-    recovery_policy: {
-      confidence_threshold: Number($("decisionThreshold").value),
-      awake_consecutive_frames: Number($("awakeFrames").value),
-    },
+    recovery_policy: selectedRecoveryPolicy(),
     task: study,
     experiment_id: $("experiment").value.trim() || crypto.randomUUID(),
     mode: $("mode").value,
@@ -1118,10 +1150,13 @@ $("interval").onchange = () => {
       project.recovery_policy?.confidence_threshold ?? 0.8;
     $("awakeFrames").value =
       project.recovery_policy?.awake_consecutive_frames ?? 3;
+    $("requireComaBaseline").checked =
+      project.recovery_policy?.require_coma_before_awake ?? false;
     $("interval").value = project.interval;
     return;
   }
   project.interval = v;
+  if (study === "ccrt") C.applyRecoveryPolicy(project);
   history("set-interval", { seconds: v });
   renderSummary();
 };
@@ -1352,6 +1387,8 @@ $("analyze").onclick = async () => {
           occupancy_score: r.occupancy_score ?? null,
           occupancy_method: r.occupancy_method || null,
           confidence: r.confidence,
+          decision_eligible: r.decision_eligible,
+          abstention_reason: r.abstention_reason,
           model: data.model,
           egg_count: r.egg_count ?? null,
         };
@@ -1457,6 +1494,10 @@ async function importSaved(file) {
     $("eggScope").value = project.wells.some((w) => !C.imageArea(w))
       ? "areas"
       : "image";
+    $("useModelPolicy").checked =
+      project.recovery_policy?.source !== "manual_override" &&
+      project.recovery_policy?.source !== "manual";
+    updatePolicyControls();
     workflowStage = project.wells.length ? "review" : "images";
     await renderFrame();
   } catch (error) {
@@ -1504,11 +1545,10 @@ window.addEventListener("beforeunload", (e) => {
     });
     $("model").onchange = () => {
       const m = models.find((m) => m.id === $("model").value);
-      if (m?.recovery_policy) {
+      if (m?.recovery_policy && $("useModelPolicy").checked) {
         project.recovery_policy = structuredClone(m.recovery_policy);
-        $("decisionThreshold").value = m.recovery_policy.confidence_threshold;
-        $("awakeFrames").value = m.recovery_policy.awake_consecutive_frames;
       }
+      updatePolicyControls();
       $("modelInfo").textContent =
         m?.id === "manual"
           ? study === "eggs"
@@ -1732,6 +1772,13 @@ function updateContext() {
     !sequence
   )
     $("model").value = "manual";
+  $("manualPolicyOptions").hidden =
+    study !== "ccrt" ||
+    $("useModelPolicy").checked ||
+    $("model").value === "manual";
+  $("policyInfo").hidden = study !== "ccrt" || $("model").value === "manual";
+  $("useModelPolicy").closest("label").hidden =
+    study !== "ccrt" || $("model").value === "manual";
   $("modelOptions").hidden = !models.some((model) => model.id !== "manual");
   $("clearRegion").hidden = !project.detection_region;
   $("comparisonOptions").hidden = $("datasetTest").checked || study !== "ccrt";
@@ -2310,18 +2357,21 @@ $("wellSpecies").onchange = () => {
     renderSummary();
   }
 };
-$("decisionThreshold").onchange = $("awakeFrames").onchange = () => {
-  try {
-    const policy = {
-      confidence_threshold: Number($("decisionThreshold").value),
-      awake_consecutive_frames: Number($("awakeFrames").value),
+$("useModelPolicy").onchange =
+  $("decisionThreshold").onchange =
+  $("awakeFrames").onchange =
+  $("requireComaBaseline").onchange =
+  $("inferMatchingGaps").onchange =
+    () => {
+      try {
+        const policy = selectedRecoveryPolicy();
+        C.applyRecoveryPolicy(project, policy);
+        project.recovery_policy = policy;
+        history("set-recovery-policy", policy);
+        updatePolicyControls();
+        updateDetails();
+        draw();
+      } catch (e) {
+        status(e.message);
+      }
     };
-    C.applyRecoveryPolicy(project, policy);
-    project.recovery_policy = policy;
-    history("set-recovery-policy", policy);
-    updateDetails();
-    draw();
-  } catch (e) {
-    status(e.message);
-  }
-};

@@ -26,13 +26,13 @@ test("exact budget/repetition counts, determinism and whole-well membership are 
     p,
     P.build(m, { seed: 17, poor_well_id: "W1", rich_well_id: "W2" }),
   );
-  assert.equal(p.runs.length, 15);
+  assert.equal(p.runs.length, 10);
   assert.equal(p.runs[0].well_uids.length, 60);
   for (const [count, repeats] of [
     [25, 1],
     [10, 2],
-    [5, 4],
-    [2, 5],
+    [5, 2],
+    [2, 2],
   ]) {
     const runs = p.runs.filter((r) => r.id.startsWith(`random-${count}-`));
     assert.equal(runs.length, repeats);

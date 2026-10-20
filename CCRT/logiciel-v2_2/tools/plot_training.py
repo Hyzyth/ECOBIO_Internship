@@ -19,6 +19,7 @@ def plot_epochs(rows, destination):
     import matplotlib.pyplot as plt
 
     groups = defaultdict(lambda: defaultdict(list))
+    validation = defaultdict(lambda: defaultdict(list))
     for row in rows:
         if (
             row.get("event") == "epoch"
@@ -28,6 +29,10 @@ def plot_epochs(rows, destination):
             groups[(row["architecture"], row["phase"])][row["run"]].append(
                 (int(row["epoch"]), float(row["loss"]))
             )
+            if row.get("validation_loss") not in (None, ""):
+                validation[(row["architecture"], row["phase"])][row["run"]].append(
+                    (int(row["epoch"]), float(row["validation_loss"]))
+                )
     if not groups:
         return False
     fig, axes = plt.subplots(
@@ -35,13 +40,22 @@ def plot_epochs(rows, destination):
     )
     for axis, ((architecture, phase), runs) in zip(axes.flat, groups.items()):
         for name, rows in runs.items():
-            axis.plot(*zip(*rows), marker="o", label=name)
+            (line,) = axis.plot(*zip(*rows), marker="o", label=name + " / train")
+            held_out = validation[(architecture, phase)].get(name)
+            if held_out:
+                axis.plot(
+                    *zip(*held_out),
+                    marker="x",
+                    linestyle="--",
+                    color=line.get_color(),
+                    label=name + " / validation",
+                )
         axis.set(
             title=f"{architecture} / {phase}", xlabel="Epoch", ylabel="Training loss"
         )
         axis.grid(alpha=0.25)
         axis.legend(fontsize="small")
-    fig.suptitle("Training loss (not held-out test loss)")
+    fig.suptitle("Training and validation loss (test data never select checkpoints)")
     fig.tight_layout()
     destination = Path(destination)
     temporary = destination.with_name(destination.stem + ".tmp" + destination.suffix)

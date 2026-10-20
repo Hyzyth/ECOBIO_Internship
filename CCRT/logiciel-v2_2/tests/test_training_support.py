@@ -192,6 +192,7 @@ class TrainingSupportTests(unittest.TestCase):
                             str(test),
                             "--architectures",
                             "resnet18",
+                            "--allow-no-validation",
                             "--no-cache",
                             "--output",
                             str(out),

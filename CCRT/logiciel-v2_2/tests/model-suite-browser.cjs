@@ -90,6 +90,36 @@ const { step, openOptions } = require("./workflow-helpers.cjs");
     );
     assert.ok(model?.available);
     await page.locator("#model").selectOption(model.id);
+    assert.equal(await page.locator("#useModelPolicy").isChecked(), true);
+    assert.equal(await page.locator("#manualPolicyOptions").isVisible(), false);
+    assert.match(
+      await page.locator("#policyInfo").textContent(),
+      /could not be validated/,
+    );
+    if (kind === "resnet18") {
+      await page.locator("#useModelPolicy").uncheck();
+      await openOptions(page, "manualPolicyOptions");
+      await page.locator("#awakeFrames").fill("1");
+      await page.locator("#awakeFrames").press("Tab");
+      await page.locator("#inferMatchingGaps").check();
+      const manual = await page.evaluate(() => project.recovery_policy);
+      assert.equal(manual.source, "manual_override");
+      assert.equal(manual.awake_consecutive_frames, 1);
+      assert.equal(manual.automatic_confirmation, true);
+      assert.equal(manual.awake_confirmation_seconds, undefined);
+      assert.equal(manual.infer_matching_gaps, true);
+      await page.locator("#useModelPolicy").check();
+      assert.equal(
+        await page.locator("#manualPolicyOptions").isVisible(),
+        false,
+      );
+      assert.equal(
+        await page.evaluate(
+          () => project.recovery_policy.automatic_confirmation,
+        ),
+        false,
+      );
+    }
     await page.locator("#analyze").click();
     await page.waitForFunction(
       (version) =>

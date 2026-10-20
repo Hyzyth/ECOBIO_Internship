@@ -173,7 +173,7 @@ for role in ['train','test']:
   assert sum(a['label']=='empty' for a in m['annotations'])==3;assert all(a['label_source'] in ['manual','manual_occupancy'] for a in m['annotations'])
   if role=='test':assert not any(name.startswith('crops/') for name in z.namelist());assert 'project.json' not in z.namelist();assert 'comparison-plan.json' not in z.namelist()
   else:
-   plan=json.loads(z.read('comparison-plan.json'));assert plan['seed']==77;assert plan['runs'][-2]['id']=='poor-poses';assert plan['runs'][-1]['id']=='rich-poses';assert len(plan['runs'])==8
+   plan=json.loads(z.read('comparison-plan.json'));assert plan['seed']==77;assert plan['runs'][-2]['id']=='poor-poses';assert plan['runs'][-1]['id']=='rich-poses';assert len(plan['runs'])==5
    assert len(plan['skipped'])==3
   z.extractall(p/role/'dataset')
 print('Partial grid train/test ZIPs, manual empty targets and fixed well plans passed.')
@@ -240,6 +240,7 @@ print('PASS both model trainers, identical full/poor/rich selections, learned oc
       [
         path.resolve(__dirname, "../tools/model_suite.py"),
         "compare",
+        "--allow-no-validation",
         "--train",
         path.join(out, "train/dataset"),
         "--test",

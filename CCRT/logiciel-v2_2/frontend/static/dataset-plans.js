@@ -42,8 +42,8 @@
     const budgets = options.budgets || [
       { wells: 25, repeats: 1 },
       { wells: 10, repeats: 2 },
-      { wells: 5, repeats: 4 },
-      { wells: 2, repeats: 5 },
+      { wells: 5, repeats: 2 },
+      { wells: 2, repeats: 2 },
     ];
     for (const budget of budgets) {
       if (
@@ -99,7 +99,7 @@
       seed,
       experiment_id: manifest.experiment_id,
       selection_unit: "well",
-      protocol: "full-grid-plus-25x1-10x2-5x4-2x5-poor-rich-v3",
+      protocol: "full-grid-plus-25x1-10x2-5x2-2x2-poor-rich-v4",
       eligible_individual_count: individuals.length,
       eligible_well_count: pool.length,
       detected_well_count: manifest.coverage?.detected_wells ?? pool.length,

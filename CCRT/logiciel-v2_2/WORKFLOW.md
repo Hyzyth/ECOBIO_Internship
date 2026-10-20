@@ -87,6 +87,24 @@ Human reports prioritize the first Awake frame, filename and frame ID. Exact CCR
 
 For independent CCRT images, select Single image / Non-sequential. ResNet and pose/RF support them; the temporal model requires an ordered multi-frame sequence.
 
+### Updating automatic well detection
+
+Stop the running Flask server after updating the code, restart it with `python app.py`, and reload the browser page. A page served by an older running detector now asks for a restart before accepting proposals. The new fitter searches the original-resolution outer lip rather than relying on the smaller Hough ring. Nonzero margin includes at least three source pixels to protect edge details at small resolutions. Nearby wells limit added margin without shrinking the fitted boundary; weak rims are recovered only with neighbour and image evidence. Check flies near the edges before approving boundaries. Use the existing resize/manual tools to retain annotations; replacing all detection proposals asks for confirmation and clears that review, so save a project backup first.
+
+### Large experiments and exported files
+
+For thousands of frames, use **Save dataset to folder (large experiments)** in Chrome/Chromium or Edge. Choose a parent folder; the app creates a new `flyscope-ccrt-…` (or `flyscope-eggs-…`) subfolder and writes originals one at a time. Wait for **Dataset saved in …**. `dataset-complete.json` is written last; a cancelled/failed export folder must be exported again. Your app annotations are retained. Keep the source images until you have verified the saved dataset.
+
+**Export training/test dataset ZIP** works in other browsers too. Large datasets are automatically divided into independent ZIP files around 256 MiB each, avoiding the old 4 GB / 65,535-file limit. Download links remain on the page until the next dataset export or navigation/reload. Download **every part**, then extract all parts into the **same empty directory**. These are ordinary ZIPs, not a multipart `.z01` archive. ZIP downloading does not create a folder automatically; check the browser's Downloads list if it starts automatically. Use the visible link if it does not. Very large individual metadata files need direct folder saving.
+
+There are no pre-generated per-well PNG crops. `images/` contains one original for every analysis frame, including unlabeled context required by temporal models. Schema 3 `annotations.json` stores manual targets plus shared normalized boundaries and sparse frame overrides. `backend/services/dataset_format.py` resolves these references for all three architectures and the original CNN trainers; old dataset exports still work. The included `dataset.py` and `dataset_format.py` provide lazy masked RGB crops for other trainers. You can check a training export before starting:
+
+```bash
+python "$DATA_DIR/train-grid/dataset.py" "$DATA_DIR/train-grid"
+```
+
+`project.json` remains an editable backup with geometry, model outputs, manual corrections and history; derived results are omitted to avoid repeating boundaries for every frame. Select the original images in the app and import this JSON to continue editing. Human reports also include this compact backup. Test exports omit the backup and training loaders: save a project separately if needed. Models and plans still use the original image hashes, manual-only targets, exclusion flags and stable Well IDs.
+
 ### Egg counting
 
 Select one image or independent images on the Egg counting page. Whole-image counts are the default; custom areas are optional. Counts/areas belong to that image alone. This remains a skeleton pending the actual egg data format and counter; CCRT training commands do not train an egg model.
@@ -116,7 +134,7 @@ Each extracted directory must directly contain `annotations.json` and `images/`.
 
 ## 5. Train the anatomical pose estimator
 
-This stage is required for **Model B**. State labels cannot supervise anatomical keypoints. The creator's [SLEAP datasets](https://github.com/talmolab/sleap-datasets) include a native courtship example with 100 labeled frames and two individuals per frame:
+This stage is required for **Model B**. State labels cannot supervise anatomical keypoints. The creator's [SLEAP datasets](https://github.com/talmolab/sleap-datasets) include a native courtship example with 100 labeled frames with multiple individuals:
 
 ```bash
 mkdir -p "$DATA_DIR/public-pose"
@@ -130,7 +148,7 @@ python tools/sleap_pose.py train \
 
 Keep the SLP and companion video together. Moved and Windows-style video paths are resolved. Training uses the actual SLEAP-NN UNet and anatomical confidence maps; missing/hidden keypoints do not contribute loss. Outputs are **`pose.json` and `pose.pt`**, recording skeleton, source/weight hashes, seed and loss.
 
-The public courtship data is anatomical pretraining, not CCRT truth or proof of overhead-well transfer. Fine-tune on suitable overhead anatomical labels with:
+Native label-record indices distinguish repeated annotations of the same video/frame/instance. The public courtship data is anatomical pretraining, not CCRT truth or proof of overhead-well transfer. Fine-tune on suitable overhead anatomical labels with:
 
 ```bash
 python tools/sleap_pose.py train --labels /path/to/overhead-labels.slp \
@@ -140,65 +158,71 @@ python tools/sleap_pose.py train --labels /path/to/overhead-labels.slp \
 
 Parent hash and skeleton must match. If you trained `pose-overhead`, use that directory instead of `pose-base` in the comparison commands below. Use the same pose parent across CCRT selections. Model B trains state and occupancy forests separately per selected CCRT subset; the external pose parent stays fixed, preserving the CCRT annotation budgets.
 
-### Updating automatic well detection
+### Inspect pose quality before training all forests
 
-Stop the running Flask server after updating the code, restart it with `python app.py`, and reload the browser page. A page served by an older running detector now asks for a restart before accepting proposals. The new fitter searches the original-resolution outer lip rather than relying on the smaller Hough ring. Nonzero margin includes at least three source pixels to protect edge details at small resolutions. Nearby wells limit added margin without shrinking the fitted boundary; weak rims are recovered only with neighbour and image evidence. Check flies near the edges before approving boundaries. Use the existing resize/manual tools to retain annotations; replacing all detection proposals asks for confirmation and clears that review, so save a project backup first.
+New pose training reserves whole videos when available. With the public single-video example, it holds out a contiguous labeled time block with a raw-frame gap; the same animals may recur, so this does not demonstrate cross-animal generalization. Equal foreground/background heatmap loss prevents mostly blank pixels from dominating. Seeded rotations move images and keypoints together without guessing left/right swaps. Best checkpoints are selected using held-out PCK@0.05 (pixel error breaks ties), with patience 5.
 
-### Large experiments and exported files
-
-For thousands of frames, use **Save dataset to folder (large experiments)** in Chrome/Chromium or Edge. Choose a parent folder; the app creates a new `flyscope-ccrt-…` (or `flyscope-eggs-…`) subfolder and writes originals one at a time. Wait for **Dataset saved in …**. `dataset-complete.json` is written last; a cancelled/failed export folder must be exported again. Your app annotations are retained. Keep the source images until you have verified the saved dataset.
-
-**Export training/test dataset ZIP** works in other browsers too. Large datasets are automatically divided into independent ZIP files around 256 MiB each, avoiding the old 4 GB / 65,535-file limit. Download links remain on the page until the next dataset export or navigation/reload. Download **every part**, then extract all parts into the **same empty directory**. These are ordinary ZIPs, not a multipart `.z01` archive. ZIP downloading does not create a folder automatically; check the browser's Downloads list if it starts automatically. Use the visible link if it does not. Very large individual metadata files need direct folder saving.
-
-There are no pre-generated per-well PNG crops. `images/` contains one original for every analysis frame, including unlabeled context required by temporal models. Schema 3 `annotations.json` stores manual targets plus shared normalized boundaries and sparse frame overrides. `backend/services/dataset_format.py` resolves these references for all three architectures and the original CNN trainers; old dataset exports still work. The included `dataset.py` and `dataset_format.py` provide lazy masked RGB crops for other trainers. You can check a training export before starting:
+`pose-validation/metrics.json` reports PCK, localization error, peak coverage and per-node results. `pose-validation/overlays.jpg` shows predicted peaks and human keypoints. A low heatmap loss alone is not evidence of accurate anatomy.
 
 ```bash
-python "$DATA_DIR/train-grid/dataset.py" "$DATA_DIR/train-grid"
+python tools/pose_diagnostics.py --pose-model "$DATA_DIR/pose-base" \
+  --labels "$DATA_DIR/public-pose/drosophila-melanogaster-courtship/courtship_labels.slp" \
+  --output "$DATA_DIR/pose-source-check"
+python tools/pose_diagnostics.py --pose-model "$DATA_DIR/pose-base" \
+  --dataset "$DATA_DIR/train-grid" --output "$DATA_DIR/pose-ccrt-check"
 ```
 
-`project.json` remains an editable backup with geometry, model outputs, manual corrections and history; derived results are omitted to avoid repeating boundaries for every frame. Select the original images in the app and import this JSON to continue editing. Human reports also include this compact backup. Test exports omit the backup and training loaders: save a project separately if needed. Models and plans still use the original image hashes, manual-only targets, exclusion flags and stable Well IDs.
+Open each `report.html`. The first command uses stored held-out source identities when available; `--all-labels` explicitly includes potentially seen source data or a separately supplied anatomical-label dataset. The CCRT preview samples Coma/Awake/Empty separately and has **no anatomical accuracy score**: state labels are not keypoints. Inspect folded/hidden legs and belly-up flies. Add representative CCRT anatomical labels in SLEAP if transfer is poor, fine-tune, then repeat the checks before launching all forests. New behavior models abstain on absent/collapsed predicted poses; this screen cannot prove anatomical correctness.
 
-## 6. Create the shared training plan
+An old pose checkpoint trained on every source example cannot provide an unseen validation subset of that same source. For a new validated baseline retrain from scratch, or supply genuinely untouched anatomical labels. Fine-tuning rejects a proposed holdout already seen by its parent. Existing pose weights remain loadable for inference and diagnostics.
 
-Set the seed and poor/rich-pose **Well IDs** in the app's training-export comparison options. `comparison-plan.json` saves actual well/annotation IDs and seeds. No special pose-diversity notes are needed.
+## 6. Create the shared training and validation plan
 
-| Selection | Runs |
-| --- | ---: |
-| All eligible annotated wells, including Empty | 1 |
-| 25 random single individuals | 1 |
-| 10 random single individuals | 2 |
-| 5 random single individuals | 4 |
-| 2 random single individuals | 5 |
-| One selected poor-pose individual | 1 |
-| One selected rich-pose individual | 1 |
-
-Newly generated plans use this smaller protocol. Existing saved plans retain their original selections unless you explicitly generate and use a new plan.
-
-That is **15 runs per architecture** when enough eligible individuals and both IDs exist. Oversized budgets are explicitly skipped; poor/rich runs are omitted if unspecified. Empty wells never enter random individual budgets. Repeated subsets can overlap; all eligible labels of a selected well are retained. Every architecture uses the **same saved selections and seeds**.
-
-If needed, generate a plan explicitly (also supports several `--train` directories):
+Keep the app’s exported plan as a provenance record. Create a **new plan** that reserves whole validation individuals before drawing training selections. Existing annotations need no changes. The command inherits your seed and poor/rich Well IDs from the exported plan:
 
 ```bash
-python tools/model_suite.py plan --train "$DATA_DIR/train-grid" --seed 2026 \
-  --poor-well W12 --rich-well W45 --output "$DATA_DIR/shared-plan.json"
+python tools/model_suite.py plan \
+  --train "$DATA_DIR/train-grid" \
+  --source-plan "$DATA_DIR/train-grid/comparison-plan.json" \
+  --validation-fraction 0.2 --output "$DATA_DIR/validation-plan.json"
 ```
 
-Replace those IDs with your choices. If names are ambiguous across grids, use `manifest-hash-prefix::well-uid` from the plan. Run once without poor/rich options to inspect qualified IDs, then regenerate with the desired choices.
+Alternatively omit `--source-plan` and supply `--seed 2026 --poor-well W12 --rich-well W45` with your chosen IDs. With several grids, ambiguous IDs require `manifest-hash-prefix::well-uid`, available in a saved plan.
+
+For roughly 60 occupied wells, reserve about 12 individuals for validation. The poor/rich training individuals are protected from this holdout. No frame of a validation individual enters a training loss, including temporal context for a training well. All eligible annotations of each selected training well stay together.
+
+| Selection | Runs per architecture | Purpose |
+| --- | ---: | --- |
+| All eligible **training-pool** wells, including Empty | 1 | Largest available training budget |
+| 25 random single individuals | 1 | About half of the remaining pool |
+| 10 random single individuals | 2 | Medium budget and selection variability |
+| 5 random single individuals | 2 | Small budget and selection variability |
+| 2 random single individuals | 2 | Extreme scarcity and selection variability |
+| Selected poor-pose individual | 1 | Manually chosen low diversity |
+| Selected rich-pose individual | 1 | Manually chosen high diversity |
+
+That is **at most 10 selections per architecture / 30 training runs** for three approaches. Oversized budgets are skipped; unspecified poor/rich selections are omitted. Random selections contain occupied single-individual wells; Empty wells remain in the full training pool. Repetitions may overlap. Every architecture uses exactly the same saved selections and validation pool. Existing 15/40-selection plans remain readable and unchanged; regenerate a plan to use the smaller protocol.
+
+“Full” means all remaining training individuals after validation is reserved, not training on validation animals. The validation annotation budget is **additional to every training budget**, including the one-well comparisons; report it. This answers how much data the model needs to fit, with a common development budget. One-well training does not provide its own independent validation animals.
+
+Do not randomly divide frames: neighbouring frames of the same fly would leak its appearance and temporal context. The default holds out whole individuals within the training grid; shared lighting/camera background means it is less demanding than a new experiment. With enough training grids use `--validation-unit grid`, or explicitly choose validation wells with `--validation-wells W3 W8`. Leave the independent test grid outside `--train`.
+
+For a later robustness study, regenerate a plan for each `--validation-folds 5 --validation-fold 0` through `4`, then compare each plan into a new directory. Folds hold out whole individuals, never random frames; poor/rich individuals stay in training. This multiplies compute by five and is optional after a fixed-holdout pilot. Test grids never choose the best fold. Prefer additional independent experiments over treating thousands of correlated frames as thousands of independent examples.
 
 ## 7. Train the three approaches
 
 Approaches are `resnet18` (appearance), `sleap-rf` (anatomy plus separate occupancy forest), and `deepethogram` (optical flow, two-stream visual features and TGM sequence classification).
 
-Start with three selections: **9 training runs** across the three approaches. The current full protocol is **45 runs** (15 selections × 3 approaches), not 120. An older saved plan can still contain 40 selections/120 runs; existing immutable plans are preserved. Check its `runs` list or the printed `suite_start.training_runs` before committing to a long job.
+Start with three selections: **9 training runs** across the three approaches. The full new protocol has **30 runs** (10 selections × 3 approaches). Inspect the saved plan and printed `suite_start.training_runs` before a long job.
 
 ```bash
 python tools/model_suite.py compare \
-  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/train-grid/comparison-plan.json" \
+  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/validation-plan.json" \
   --test "$DATA_DIR/test-grid-1" --pose-model "$DATA_DIR/pose-base" \
   --runs all-annotated-wells poor-poses rich-poses \
   --epochs 5 --flow-epochs 3 --sequence-epochs 5 \
   --batch-size 4 --image-size 128 --window 5 \
-  --confidence-threshold 0.8 --awake-frames 3 --false-awake-cost 2 \
+  --policy auto --false-awake-cost 2 --patience 3 \
   --device cuda --output "$DATA_DIR/comparison-pilot"
 ```
 
@@ -206,16 +230,16 @@ For the **full training suite**, run this command without a `--runs` filter, usi
 
 ```bash
 python tools/model_suite.py compare \
-  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/train-grid/comparison-plan.json" \
+  --train "$DATA_DIR/train-grid" --plan "$DATA_DIR/validation-plan.json" \
   --test "$DATA_DIR/test-grid-1" --pose-model "$DATA_DIR/pose-base" \
   --epochs 5 --flow-epochs 3 --sequence-epochs 5 \
   --batch-size 4 --resnet-batch-size 32 --pose-batch-size 16 --temporal-batch-size 8 \
   --image-size 128 --window 5 \
-  --confidence-threshold 0.8 --awake-frames 3 --false-awake-cost 2 \
+  --policy auto --false-awake-cost 2 --patience 3 \
   --device cuda --output "$DATA_DIR/comparison-full"
 ```
 
-This expands the selections, not the training duration per selection. The epoch values are examples, not established convergence settings. Choose epochs and batch sizes on training/validation data, then keep them fixed across the matched runs. Changing batch size changes optimization, so use the same chosen overrides for both pilot and full comparisons when comparing their scores. If you generated `shared-plan.json` in step 6, substitute that path. Omit `--plan` to use a single grid's exported plan automatically. Use `--architectures resnet18 sleap-rf` for independent images, or choose any one approach. Model B is the only approach needing `--pose-model`.
+This expands the selections, not the training duration per selection. The epoch values are examples, not established convergence settings. Choose epochs and batch sizes on training/validation data, then keep them fixed across the matched runs. Changing batch size changes optimization, so use the same chosen overrides for both pilot and full comparisons when comparing their scores. Use the validation plan from step 6. Old plans without validation are rejected by default. `--allow-no-validation` is an explicit legacy/software-smoke opt-out, with no independent checkpoint selection; it is unsuitable for a reported training comparison. Use `--architectures resnet18 sleap-rf` for independent images, or choose any one approach. Model B is the only approach needing `--pose-model`.
 
 ### Live progress, loss logs and GPU throughput
 
@@ -227,7 +251,7 @@ After dataset/plan validation, the output directory contains:
 | --- | --- |
 | `progress.jsonl` | Incrementally flushed progress events, selected settings, device/GPU, artifact paths and failure/interruption reasons. |
 | `training.csv` | Every neural batch loss plus epoch means, architecture/selection/phase, counts, throughput, input wait and allocated/reserved GPU MiB. Buffered rows flush at progress messages and epoch completion. |
-| `loss.png` | Training-loss curves, refreshed after each completed epoch, with separate panels for appearance, optical flow, two-stream and TGM losses. |
+| `loss.png` | Training and validation curves, refreshed after each completed epoch, with separate panels for appearance, optical flow, two-stream and TGM losses. |
 
 `elapsed_s` and `input_wait_s` in training rows describe the current epoch; ETA estimates its remaining time. Input wait measures time waiting for prepared CPU batches. CUDA work is asynchronous, so these are throughput diagnostics, not a GPU kernel profiler. Phase losses have different meanings/scales. There is no SLEAP/RF gradient-loss curve: its forests are fitted on fixed pose features. These logs **do not use held-out test data as validation loss**.
 
@@ -242,7 +266,7 @@ python tools/plot_training.py \
 
 The plot command needs at least one completed epoch; batch losses are readable in the CSV immediately. To also retain messages from initial verification and full Python tracebacks on Linux, use `set -o pipefail` and append `2>&1 | tee "$DATA_DIR/comparison-full-console.log"` to the compare command. The Python progress records themselves flush without requiring `python -u`.
 
-The old trainer repeatedly decoded full-grid images for randomly ordered single-well crops and only printed at epoch completion. A long silence after the ImageNet download did not establish that it was stuck. The new default prepares a **reusable, memory-mapped uint8 crop cache**, decoding each required source frame once, then reading the same masked crops across epochs and selections. Only selected training wells and their causal context enter this cache; tests never fit it. Hash verification still runs on every command. Preparation is CPU/disk work, so low GPU usage during that phase is expected.
+The old trainer repeatedly decoded full-grid images for randomly ordered single-well crops and only printed at epoch completion. A long silence after the ImageNet download did not establish that it was stuck. The new default prepares a **reusable, memory-mapped uint8 crop cache**, decoding each required source frame once, then reading the same masked crops across epochs and selections. Selected fitting and validation wells and their causal context enter this label-free cache. Validation pixels never enter gradient updates; tests never fit it. Hash verification still runs on every command. Preparation is CPU/disk work, so low GPU usage during that phase is expected.
 
 The cache defaults to `$DATA_DIR/.flyscope-training-cache` when output is directly inside `$DATA_DIR`. Put `--cache-dir /path/on/local-ssd/flyscope-crops` on **both** commands to relocate/reuse it. At 128×128 RGB, 5,400 frames × 61 wells need about **15.1 GiB** plus small occupancy features/headers. Preparation prints its actual size estimate and checks free disk space. Temporary DeepEthogram feature files need another ~1.3 GiB for that many frame/well pairs and are removed after each temporal run. Completed caches can be deleted between commands; original exports and annotations are not changed. `--no-cache` disables disk caching if storage is constrained, at the cost of slower epochs. A cancelled cache build is rebuilt; completed model checkpoints and logs remain in their output directories. There is no optimizer/partial-epoch resume: rerun with a new output directory, or evaluate completed `model.json` checkpoints separately.
 
@@ -250,9 +274,25 @@ Bounded CPU prefetch overlaps input preparation with training (`--prefetch-batch
 
 Defaults fine-tune ImageNet backbones; `--initialization scratch` starts fresh weights. Each run restarts independently from the common base, never the preceding subset's CCRT weights. The temporal model uses current/past analysis frames from selected individuals; no setup/future frames or unselected wells enter targets. Missing interior context/geometry is an explicit error.
 
-`--device cuda` requires the GPU; `cpu` is the tested fallback and `auto` chooses CUDA when available. Low confidence becomes **Unsure**, an abstention rather than a fourth training class. Defaults require three consecutive high-confidence Awake frames; once confirmed, the decision stays Awake. Recovery is retrospectively assigned to the first frame of that run, with the confirmation frame recorded separately. Raw contradictions and manual corrections remain intact.
+`--device cuda` requires the GPU; `cpu` is the tested fallback and `auto` chooses CUDA when available.
 
-The false-Awake cost increases Coma/Empty class weights relative to Awake; there is no guessed belly-up orientation rule. Scores are not assumed calibrated. Select thresholds, costs, streak lengths and other hyperparameters on separate training/validation data **before** final held-out tests. Test grids never fit weights, choose subsets or tune thresholds. CCRT annotation splits are shared across approaches; their external ImageNet/pose pretraining differs and is documented.
+### Validation, balancing and automatic recovery settings
+
+Epoch counts are **maximums**. Every supervised neural stage evaluates reserved validation individuals after each epoch, monitors balanced negative log likelihood, stops after `--patience 3` epochs without improvement and restores its best checkpoint. Optical flow selects its best held-out photometric loss, which is not a behavior accuracy score. Forests use bounded depth/leaf size and report held-out class metrics. `training.csv` and `loss.png` show both training and validation. `model.json` records supports, split fingerprint and selected epochs.
+
+Default `--balance well-class` gives equal mass to represented classes and, within each class, to contributing individuals. `--false-awake-cost 2` adds an explicit Coma/Empty cost. All selected targets are still visited; weights do not invent missing classes. `--balance class` and `none` are available for controlled ablations. AdamW weight decay and regularized forests reduce memorization risk; they do not establish generalization. No belly-up appearance penalty is guessed from state labels.
+
+**Leave `--policy auto` enabled.** After restoring the best checkpoint, training searches confidence thresholds and sustained-Awake durations using the same reserved validation pool, with no test predictions. It requires observed Coma before irreversible Awake confirmation. Candidates must have at most 5% false-early events among informative validation wells and detect at least 80% of observed recoveries. Among feasible candidates it prioritizes false-early events, recovery coverage, onset delay and then confirmation latency. The full 50-candidate audit is saved as `recovery-policy-search.json` in each checkpoint directory.
+
+These are empirical development criteria, not statistical guarantees, especially with a dozen animals. With fewer than two Coma-containing validation individuals, no observed recovery, inconsistent recovery labels, or no passing candidate, **automatic recovery confirmation is disabled**. Raw scores remain available; confident Coma/Empty can still be shown. Awake decisions remain Unsure for manual review rather than inventing a Coma label. Scores are not presumed calibrated: high confidence on wrong examples cannot always be fixed by threshold selection.
+
+The app uses the checkpoint’s saved settings by default and explains its validation status. **Advanced: override recovery settings** is available after unchecking saved settings. The CLI equivalent is `--policy manual --confidence-threshold 0.8 --awake-frames 3`; manual overrides are recorded and do not constitute validated settings. `--allow-initial-awake` permits left-censored automatic confirmations for explicitly chosen protocols. By default, initially Awake predictions without an observed Coma baseline stay Unsure. Independent-image classification does not require a temporal baseline.
+
+When acquisition intervals are known, saved confirmation duration is converted to a suitable observation count at inference. Three observations at one-second spacing span two seconds. Model C’s temporal window still represents a specific sampling interval: resample deliberately or retrain when that changes. Once confirmed, sequence decisions stay Awake; retrospective onset and later confirmation frames are both saved, together with unchanged raw probabilities. Manual corrections remain separate.
+
+Offline sequence review also infers an uncertain gap bounded by matching confident Coma/Coma (or Awake/Awake) decisions, using the single irreversible-recovery assumption. It does not bridge a Coma/Awake transition, missing frames, changed analysis sessions or unusable geometry/poses. Inferred states have no invented confidence: `temporal_inference` records their bounding frames, and raw scores/manual labels remain unchanged. New models save `infer_matching_gaps: true`; advanced manual settings can disable it. Existing model policies retain their historical default.
+
+The shared validation cohort is reused for checkpoint and policy selection: it is **development data**, not an unbiased performance estimate. Freeze the protocol before a fresh final test grid. A grid whose errors have already guided changes should be reported as a development benchmark, even if exported with the test checkbox. The supplied first run had no Empty examples in training or testing; annotate Empty wells before claiming Empty detection quality.
 
 ## 8. Evaluate all weights
 
@@ -331,3 +371,5 @@ python tools/validate_model_suite.py \
 ```
 
 This trains/reloads nine checkpoints (three approaches × full/poor/rich), executes all temporal stages and scores an independent partly annotated synthetic grid. CI uses the same requirements with CPU wheels for its GPU-less runner. Optional browser development tools are described in [README.md](README.md#validation).
+
+For the audit of the first 45-checkpoint experiment, see [TRAINING_REVIEW.md](TRAINING_REVIEW.md). For the source-code and artifact map, see [MAINTAINING.md](MAINTAINING.md).

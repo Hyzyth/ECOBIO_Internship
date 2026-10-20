@@ -85,6 +85,17 @@ def first_recovery(rows, truth=False):
 def metrics(rows, manifest):
     overall = classification(rows)
     raw = classification(rows, "raw_prediction")
+    truth_support = {
+        label: values["support"] for label, values in raw["classes"].items()
+    }
+    total_truth = sum(truth_support.values())
+    first = {}
+    for row in rows:
+        if (
+            row["well_id"] not in first
+            or row["frame_index"] < first[row["well_id"]]["frame_index"]
+        ):
+            first[row["well_id"]] = row
     scored = [r for r in rows if r.get("scored")]
     calibration = {"brier": None, "ece": None, "bins": [], "auc": {}}
     if scored:
@@ -205,6 +216,27 @@ def metrics(rows, manifest):
         "decision_classes": overall["classes"],
         "decision_confusion": overall["confusion"],
         "raw": raw,
+        "baselines": {
+            "class_support": truth_support,
+            "majority_class": (
+                max(truth_support, key=truth_support.get) if total_truth else None
+            ),
+            "majority_accuracy": (
+                max(truth_support.values()) / total_truth if total_truth else None
+            ),
+            "always_awake_accuracy": (
+                truth_support["awake"] / total_truth if total_truth else None
+            ),
+        },
+        "initial_frame": {
+            "wells": len(first),
+            "raw_awake_wells": sum(
+                r.get("raw_prediction") == "awake" for r in first.values()
+            ),
+            "decision_awake_wells": sum(
+                r.get("prediction") == "awake" for r in first.values()
+            ),
+        },
         "calibration": calibration,
         "species": species,
         "recovery": recovery_summary,
@@ -232,15 +264,41 @@ def write_comparison(results, out):
                 "selected_wells": len(m["selection"]["well_uids"]),
                 "selected_annotations": len(m["selection"]["annotation_ids"]),
                 "confidence_threshold": m["recovery_policy"]["confidence_threshold"],
-                "awake_consecutive_frames": m["recovery_policy"][
-                    "awake_consecutive_frames"
-                ],
+                "awake_consecutive_frames": r.get(
+                    "applied_recovery_policy", m["recovery_policy"]
+                )["awake_consecutive_frames"],
+                "policy_source": m["recovery_policy"].get("source", "legacy"),
+                "policy_selection_status": m["recovery_policy"]
+                .get("selection", {})
+                .get("status", "not_selected"),
+                "automatic_recovery_confirmation": m["recovery_policy"].get(
+                    "automatic_confirmation", True
+                ),
+                "awake_confirmation_seconds": m["recovery_policy"].get(
+                    "awake_confirmation_seconds"
+                ),
+                "infer_matching_gaps": m["recovery_policy"].get(
+                    "infer_matching_gaps", False
+                ),
                 **metrics["overall"],
                 "raw_accuracy": metrics["raw"]["accuracy"],
+                "raw_balanced_accuracy": metrics["raw"]["balanced_accuracy"],
+                "raw_coma_recall": metrics["raw"]["classes"]["coma"]["recall"],
+                "raw_awake_precision": metrics["raw"]["classes"]["awake"]["precision"],
+                "majority_baseline_accuracy": metrics["baselines"]["majority_accuracy"],
+                "always_awake_accuracy": metrics["baselines"]["always_awake_accuracy"],
                 "raw_macro_f1": metrics["raw"]["macro_f1"],
                 "ece": metrics["calibration"]["ece"],
                 "brier": metrics["calibration"]["brier"],
                 "recovery_mae_frames": metrics["recovery"]["mae_frames"],
+                "paired_recovery_wells": metrics["recovery"]["paired_observed_wells"],
+                "censored_predicted_recoveries": metrics["recovery"][
+                    "censored_predicted_recoveries"
+                ],
+                "initial_awake_wells": metrics["initial_frame"]["decision_awake_wells"],
+                "validation_wells": len(
+                    (m.get("validation") or {}).get("well_uids", [])
+                ),
                 "missed_recoveries": metrics["recovery"]["missed_recoveries"],
                 "false_recoveries": metrics["recovery"]["false_recoveries"],
             }
@@ -271,7 +329,11 @@ def write_comparison(results, out):
         "coverage",
         "accuracy_when_decided",
         "raw_macro_f1",
+        "raw_coma_recall",
+        "always_awake_accuracy",
         "recovery_mae_frames",
+        "paired_recovery_wells",
+        "initial_awake_wells",
         "false_awake",
     ]
     table = (

@@ -95,7 +95,7 @@ class SuiteContracts(unittest.TestCase):
             data = TrainingData([train])
             plan = plan_for(data, 42, "W1", "W2")
             self.assertEqual(plan, plan_for(data, 42, "W1", "W2"))
-            self.assertEqual(len(plan["runs"]), 8)
+            self.assertEqual(len(plan["runs"]), 5)
             for run in plan["runs"]:
                 if run["id"].startswith("random"):
                     self.assertTrue(all(data.occupied[w] for w in run["well_uids"]))

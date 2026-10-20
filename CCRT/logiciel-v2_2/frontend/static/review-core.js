@@ -199,14 +199,18 @@
   // Unsure is an abstention, not a biological target. Once awake is confirmed,
   // sequence decisions stay awake; raw model outputs remain available separately.
   function applyRecoveryPolicy(project, options = {}) {
-    const threshold =
-        options.confidence_threshold ??
-        project.recovery_policy?.confidence_threshold ??
-        0.8,
+    const policy =
+        options.source === "manual_override"
+          ? options
+          : { ...project.recovery_policy, ...options },
+      threshold = policy.confidence_threshold ?? 0.8,
+      seconds = policy.awake_confirmation_seconds,
       consecutive =
-        options.awake_consecutive_frames ??
-        project.recovery_policy?.awake_consecutive_frames ??
-        3;
+        seconds != null && project.interval > 0
+          ? Math.max(1, Math.ceil(seconds / project.interval - 1e-9) + 1)
+          : (policy.awake_consecutive_frames ?? 3),
+      requireComa = policy.require_coma_before_awake ?? false,
+      confirmationEnabled = policy.automatic_confirmation ?? true;
     if (
       !Number.isFinite(threshold) ||
       threshold < 0.5 ||
@@ -220,7 +224,8 @@
       let streak = 0,
         confirmed = null,
         onsetFrame = null,
-        source = null;
+        source = null,
+        observedComa = false;
       for (const i of indices) {
         const r = project.records[key(i, well.uid)];
         if (!r?.model) {
@@ -228,6 +233,7 @@
           confirmed = null;
           onsetFrame = null;
           source = null;
+          observedComa = false;
           continue;
         }
         const identity =
@@ -237,13 +243,19 @@
           confirmed = null;
           onsetFrame = null;
           source = identity;
+          observedComa = false;
         }
         r.raw_prediction ??= r.prediction;
         r.raw_confidence ??= r.confidence;
         const raw = r.raw_prediction,
           score = r.raw_confidence;
+        delete r.recovery_status;
+        delete r.temporal_inference;
         r.confidence =
-          (well.partial_frames?.[i] ?? well.detection?.partial) ? null : score;
+          (well.partial_frames?.[i] ?? well.detection?.partial) ||
+          r.decision_eligible === false
+            ? null
+            : score;
         if (confirmed !== null) {
           r.prediction = "awake";
           r.confidence = null;
@@ -253,17 +265,33 @@
             carried_forward: true,
             confidence_threshold: threshold,
             awake_consecutive_frames: consecutive,
+            require_coma_before_awake: requireComa,
+            automatic_confirmation: confirmationEnabled,
           };
           continue;
         }
         const confident =
           Number.isFinite(score) &&
+          r.decision_eligible !== false &&
           score >= threshold &&
           !(well.partial_frames?.[i] ?? well.detection?.partial);
         if (raw === "empty") {
           r.prediction = score == null || confident ? "empty" : "unsure";
           streak = 0;
+        } else if (
+          raw === "awake" &&
+          confident &&
+          project.mode === "sequence" &&
+          (!confirmationEnabled || (requireComa && !observedComa))
+        ) {
+          r.prediction = "unsure";
+          r.recovery_status = confirmationEnabled
+            ? "no_observed_coma_baseline"
+            : "policy_not_validated";
+          streak = 0;
         } else if (raw === "awake" && confident) {
+          delete r.recovery_status;
+          delete r.temporal_inference;
           streak++;
           if (project.mode !== "sequence" || streak >= consecutive) {
             r.prediction = "awake";
@@ -281,10 +309,13 @@
                 carried_forward: false,
                 confidence_threshold: threshold,
                 awake_consecutive_frames: consecutive,
+                require_coma_before_awake: requireComa,
+                automatic_confirmation: confirmationEnabled,
               };
             }
           } else r.prediction = "unsure";
         } else {
+          if (raw === "coma" && confident) observedComa = true;
           streak = 0;
           r.prediction = raw === "coma" && confident ? "coma" : "unsure";
         }
@@ -294,7 +325,67 @@
           carried_forward: false,
           confidence_threshold: threshold,
           awake_consecutive_frames: consecutive,
+          require_coma_before_awake: requireComa,
+          automatic_confirmation: confirmationEnabled,
         };
+      }
+      if (policy.infer_matching_gaps && project.mode === "sequence") {
+        let anchor = null,
+          pending = [],
+          lastFrame = null,
+          session = null;
+        for (const i of indices) {
+          const r = project.records[key(i, well.uid)];
+          const identity =
+            r?.analysis_session ||
+            r?.model?.version ||
+            r?.model?.id ||
+            "legacy";
+          if (
+            !r?.model ||
+            r.decision_eligible === false ||
+            (well.partial_frames?.[i] ?? well.detection?.partial) ||
+            (lastFrame !== null && i !== lastFrame + 1) ||
+            identity !== session
+          ) {
+            anchor = null;
+            pending = [];
+          }
+          session = identity;
+          lastFrame = i;
+          if (
+            !r?.model ||
+            r.decision_eligible === false ||
+            (well.partial_frames?.[i] ?? well.detection?.partial)
+          )
+            continue;
+          const confident =
+            ["coma", "awake"].includes(r.prediction) &&
+            ((Number.isFinite(r.confidence) && r.confidence >= threshold) ||
+              r.recovery_decision?.confirmed_frame_index != null);
+          if (confident) {
+            if (anchor && anchor.state === r.prediction) {
+              for (const frame of pending) {
+                const item = project.records[key(frame, well.uid)];
+                item.prediction = r.prediction;
+                item.confidence = null;
+                item.temporal_inference = {
+                  method: "matching_brackets",
+                  state: r.prediction,
+                  left_frame_index: anchor.frame,
+                  right_frame_index: i,
+                  assumption: "single_irreversible_recovery",
+                };
+              }
+            }
+            anchor = { frame: i, state: r.prediction };
+            pending = [];
+          } else if (r.prediction === "unsure" && anchor) pending.push(i);
+          else {
+            anchor = null;
+            pending = [];
+          }
+        }
       }
     }
   }
@@ -364,6 +455,7 @@
           analysis_session: record.analysis_session || null,
           raw_confidence: record.raw_confidence ?? record.confidence ?? null,
           recovery_decision: record.recovery_decision || null,
+          temporal_inference: record.temporal_inference || null,
           species:
             well.occupancy === "empty"
               ? null
@@ -505,6 +597,27 @@
         p.recovery_policy.awake_consecutive_frames < 1)
     )
       throw Error("Invalid recovery decision policy.");
+    if (
+      p.recovery_policy?.require_coma_before_awake != null &&
+      typeof p.recovery_policy.require_coma_before_awake !== "boolean"
+    )
+      throw Error("Invalid Coma baseline requirement.");
+    if (
+      p.recovery_policy?.automatic_confirmation != null &&
+      typeof p.recovery_policy.automatic_confirmation !== "boolean"
+    )
+      throw Error("Invalid automatic recovery setting.");
+    if (
+      p.recovery_policy?.awake_confirmation_seconds != null &&
+      (!Number.isFinite(p.recovery_policy.awake_confirmation_seconds) ||
+        p.recovery_policy.awake_confirmation_seconds < 0)
+    )
+      throw Error("Invalid sustained evidence duration.");
+    if (
+      p.recovery_policy?.infer_matching_gaps != null &&
+      typeof p.recovery_policy.infer_matching_gaps !== "boolean"
+    )
+      throw Error("Invalid temporal gap inference setting.");
     if (p.detection_regions != null) {
       if (
         typeof p.detection_regions !== "object" ||

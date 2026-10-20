@@ -244,13 +244,13 @@ with zipfile.ZipFile(p/'long.zip') as z:
 d=Dataset(p/'dataset','train');assert len(d.images)==5400;assert len(d.annotations)==302400
 assert d.manifest['mode']=='sequence'
 assert len(d.geometry)==324000
-assert len(load_plan(d,p/'dataset/comparison-plan.json')['runs'])==15
+assert len(load_plan(d,p/'dataset/comparison-plan.json')['runs'])==10
 a=d.annotations['f101-well-0'];assert a['boundary_normalized'][0][0]==.2
 assert 'f1-well-57' not in d.annotations
 assert d.annotations['f5400-well-59']['label']=='empty'
 assert d.sample('f1-well-0')[0].shape==(200,200,1)
 backup=json.loads((p/'dataset/project.json').read_text());assert 'results' not in backup;assert len(backup['records'])==297000
-print('Long export ZIP integrity, shared geometry, incomplete-export guard, immutable 15-run plan and real model input passed.')`,
+print('Long export ZIP integrity, shared geometry, incomplete-export guard, immutable 10-run plan and real model input passed.')`,
     ],
     { stdio: "inherit", env: { ...process.env, KERAS_BACKEND: "torch" } },
   );
