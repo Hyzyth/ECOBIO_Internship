@@ -3,12 +3,26 @@ name: FlyScope unified runtime
 on:
   pull_request:
     paths:
-      - "CCRT/logiciel-v2_2/**"
+      - "flyscope/**"
+      - "frontend/**"
+      - "tools/**"
+      - "tests/**"
+      - "models/**"
+      - "app.py"
+      - "requirements.txt"
+      - ".python-version"
       - ".github/workflows/flyscope.yml"
   push:
     branches: [main]
     paths:
-      - "CCRT/logiciel-v2_2/**"
+      - "flyscope/**"
+      - "frontend/**"
+      - "tools/**"
+      - "tests/**"
+      - "models/**"
+      - "app.py"
+      - "requirements.txt"
+      - ".python-version"
       - ".github/workflows/flyscope.yml"
   workflow_dispatch:
 
@@ -22,7 +36,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: CCRT/logiciel-v2_2
+        working-directory: .
     env:
       KERAS_BACKEND: torch
       MPLCONFIGDIR: /tmp/flyscope-mpl
