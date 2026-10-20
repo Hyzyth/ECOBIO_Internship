@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local experiments/artifacts belong outside source control.
+/experiments/
+/trained-models/
+/datasets/
+/outputs/
+.flyscope-training-cache/
+
+# Generated packaging/build output.
+/build/
+/dist/
+*.egg-info/
+.DS_Store

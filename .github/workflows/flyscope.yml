@@ -3,12 +3,26 @@ name: FlyScope unified runtime
 on:
   pull_request:
     paths:
-      - "CCRT/logiciel-v2_2/**"
+      - "flyscope/**"
+      - "frontend/**"
+      - "tools/**"
+      - "tests/**"
+      - "models/**"
+      - "app.py"
+      - "requirements.txt"
+      - ".python-version"
       - ".github/workflows/flyscope.yml"
   push:
     branches: [main]
     paths:
-      - "CCRT/logiciel-v2_2/**"
+      - "flyscope/**"
+      - "frontend/**"
+      - "tools/**"
+      - "tests/**"
+      - "models/**"
+      - "app.py"
+      - "requirements.txt"
+      - ".python-version"
       - ".github/workflows/flyscope.yml"
   workflow_dispatch:
 
@@ -22,7 +36,7 @@ jobs:
     timeout-minutes: 30
     defaults:
       run:
-        working-directory: CCRT/logiciel-v2_2
+        working-directory: .
     env:
       KERAS_BACKEND: torch
       MPLCONFIGDIR: /tmp/flyscope-mpl
@@ -62,7 +76,9 @@ jobs:
           bash -e -c '
             python tools/sleap_pose.py train --labels "$RUNNER_TEMP/pose-data/drosophila-melanogaster-courtship/courtship_labels.slp" --output "$RUNNER_TEMP/pose-smoke" --epochs 1 --max-examples 8 --size 64 --filters 8 --batch-size 2 --device cpu
             python tools/sleap_pose.py train --labels "$RUNNER_TEMP/pose-data/drosophila-melanogaster-courtship/courtship_labels.slp" --parent "$RUNNER_TEMP/pose-smoke" --output "$RUNNER_TEMP/pose-finetune-smoke" --epochs 1 --max-examples 8 --batch-size 2 --device cpu
+            python tools/pose_diagnostics.py --pose-model "$RUNNER_TEMP/pose-smoke" --labels "$RUNNER_TEMP/pose-data/drosophila-melanogaster-courtship/courtship_labels.slp" --output "$RUNNER_TEMP/pose-label-diagnostics"
             python tools/validate_model_suite.py --pose-model "$RUNNER_TEMP/pose-smoke" --output "$RUNNER_TEMP/suite-smoke"
+            python tools/pose_diagnostics.py --pose-model "$RUNNER_TEMP/pose-smoke" --dataset "$RUNNER_TEMP/suite-smoke/fixtures/train" --output "$RUNNER_TEMP/pose-ccrt-diagnostics"
           ' > "$RUNNER_TEMP/suite-training.log" 2>&1
           suite_result=$?
           set -e
