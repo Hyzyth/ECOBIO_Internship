@@ -732,6 +732,9 @@ function setBusy(value) {
     "training",
     "trainingFolder",
     "datasetTest",
+    "cropDataset",
+    "cropPadding",
+    "cropEncoding",
     "comparisonSeed",
     "poorWell",
     "richWell",
@@ -1781,13 +1784,14 @@ function updateContext() {
     study !== "ccrt" || $("model").value === "manual";
   $("modelOptions").hidden = !models.some((model) => model.id !== "manual");
   $("clearRegion").hidden = !project.detection_region;
+  $("cropControls").hidden = !$("cropDataset").checked;
   $("comparisonOptions").hidden = $("datasetTest").checked || study !== "ccrt";
   $("training").textContent = $("datasetTest").checked
     ? "Export test dataset ZIP"
     : `Export ${study === "ccrt" ? "CCRT" : "egg"} training dataset ZIP`;
   $("datasetHint").textContent = $("datasetTest").checked
     ? "Evaluation images and annotations only. Unannotated areas are not scored. Save a project backup separately to resume editing."
-    : "Original images and shared boundaries; crops are made by the trainers as needed. Partial annotations are supported. For large experiments, save directly to a folder. ZIP exports are split into bounded parts; extract every part into the same folder.";
+    : "One image per frame and shared boundaries; individual well crops are made during training. Partial annotations are supported. For large experiments, save directly to a folder. ZIP exports are split into bounded parts; extract every part into the same folder.";
   $("trainingFolder").hidden = typeof window.showDirectoryPicker !== "function";
   $("analyze").hidden = $("model").value === "manual";
   $("detectionHint").textContent =
@@ -1981,12 +1985,15 @@ async function exportDataset(toFolder = false) {
         $("progress").max = total;
         $("progress").value = done;
         status(
-          `${phase === "archive" ? "Packing ZIP files" : phase === "metadata" ? "Writing annotations and shared selections" : phase === "saving-images" ? "Saving original images to folder" : "Hashing original images"}: ${done} / ${total}… Export is complete only when a saved-folder message or download links appear.`,
+          `${phase === "archive" ? "Packing ZIP files" : phase === "metadata" ? "Writing annotations and shared selections" : phase === "saving-images" ? "Saving dataset images to folder" : "Preparing dataset images"}: ${done} / ${total}… Export is complete only when a saved-folder message or download links appear.`,
         );
       },
       () => cancelled,
       {
         directory,
+        cropToWells: study === "ccrt" && $("cropDataset").checked,
+        cropPadding: Number($("cropPadding").value),
+        cropEncoding: $("cropEncoding").value,
         role: $("datasetTest").checked ? "test" : "train",
         comparisons: {
           seed: Number($("comparisonSeed").value),
@@ -2017,7 +2024,7 @@ async function exportDataset(toFolder = false) {
       box.hidden = false;
     }
     status(
-      `${directory ? `Dataset saved in ${directory.name} inside your selected folder.` : "Dataset prepared; download links are below."} ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. Original images and boundaries included; crops are derived during training.`,
+      `${directory ? `Dataset saved in ${directory.name} inside your selected folder.` : "Dataset prepared; download links are below."} ${manifest.annotated_sample_count} manual samples; ${manifest.eligible_sample_count} eligible, ${manifest.annotated_sample_count - manifest.eligible_sample_count} flagged for review. Dataset images and boundaries included; individual well crops are derived during training.`,
     );
   } catch (error) {
     status(
@@ -2267,6 +2274,7 @@ $("eggScope").onchange = () => {
 };
 
 $("datasetTest").onchange = updateContext;
+$("cropDataset").onchange = updateContext;
 
 document.querySelectorAll("[data-step],[data-go-step]").forEach((button) => {
   button.onclick = () => goToStep(button.dataset.step || button.dataset.goStep);

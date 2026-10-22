@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/static/styles.css" />
     <script defer src="/static/review-core.js"></script>
     <script defer src="/static/dataset-plans.js"></script>
+    <script defer src="/static/spatial-export.js"></script>
     <script defer src="/static/training-export.js"></script>
     <script defer src="/static/review.js"></script>
   </head>
@@ -25,6 +26,7 @@
       <nav aria-label="Study">
         <a href="/ccrt" aria-current="{{ 'page' if study == 'ccrt' else 'false' }}">CCRT</a>
         <a href="/eggs" aria-current="{{ 'page' if study == 'eggs' else 'false' }}">Egg counting</a>
+        <a href="/pose">Pose annotation</a>
       </nav>
     </header>
     <main>
@@ -175,6 +177,14 @@
               <label>Rich-pose well ID (optional)<input id="richWell" placeholder="e.g. W8" /></label>
               <p class="hint">Every model uses the same saved selections: one full annotated grid (including Empty); 1 × 25, 2 × 10, 2 × 5 and 2 × 2 single-individual wells; one poor-pose and one rich-pose well. Up to 10 runs per model. Oversized budgets are skipped. Unannotated wells are never negative targets. Previously saved plans still work in the training tools.</p>
             </details>
+            <div data-ccrt>
+              <label><input id="cropDataset" type="checkbox" checked /> Export only the area containing all wells</label>
+              <div id="cropControls">
+              <label>Margin (pixels on the first exported image)<input id="cropPadding" type="number" value="32" min="0" max="512" step="1" /></label>
+              <label>Image encoding<select id="cropEncoding"><option value="png">PNG · lossless</option><option value="jpeg">JPEG · smaller, quality 98%</option></select></label>
+              <p class="hint">Includes all well boundaries and frame corrections, with one consistent region across the sequence. PNG preserves pixels but can be larger than the original JPEG. Your editable project keeps the original coordinates and images.</p>
+              </div>
+            </div>
             <p id="datasetHint" class="hint"></p>
             <button id="training" class="secondary">Export {{ 'CCRT' if study == 'ccrt' else 'egg' }} training dataset ZIP</button>
             <button id="trainingFolder" class="secondary" hidden>Save dataset to folder (large experiments)</button>

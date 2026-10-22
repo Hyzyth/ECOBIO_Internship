@@ -36,3 +36,6 @@ new experiments, exported datasets, caches, trained weights and results outside 
 - [App guide](docs/APP_GUIDE.md): annotation, manual corrections and exports.
 - [First training audit](docs/TRAINING_REVIEW.md): measured problems and fixes.
 - [Maintaining the project](docs/MAINTAINING.md): responsibilities, scientific contracts and checks.
+
+- [Bilan pratique en français](docs/BILAN_CCRT_FR.md): usage sur PC, partage, ressources et limites actuelles.
+- [Second experiment review](docs/SECOND_TRAINING_REVIEW.md): CCRT timing correction, anatomy transfer and loss interpretation.

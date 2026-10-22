@@ -135,6 +135,14 @@ def centered_examples(labels, size):
     return nodes, examples, data
 
 
+def load_examples(labels, size):
+    if Path(labels).suffix.lower() == ".json":
+        from flyscope.data.pose_labels import load_examples as load_json
+
+        return load_json(labels, size)
+    return centered_examples(labels, size)
+
+
 def train(args):
     import torch
     from importlib.metadata import version
@@ -160,7 +168,7 @@ def train(args):
         parent = read_meta(args.parent)
         args.size = parent["configuration"]["size"]
         args.filters = parent["configuration"]["filters"]
-    nodes, examples, data = centered_examples(args.labels, args.size)
+    nodes, examples, data = load_examples(args.labels, args.size)
     if args.max_examples:
         order = np.random.default_rng(args.seed).permutation(len(examples))[
             : args.max_examples
@@ -178,6 +186,8 @@ def train(args):
             }
 
             def identity(record):
+                if record.get("group_id"):
+                    return record["group_id"], "whole_individual"
                 content = record.get("video_sha256") or parent_hashes.get(
                     record["video"]
                 )
@@ -364,6 +374,11 @@ def train(args):
             ),
             "preprocessing": "centered-square-rgb-0-1-v1",
             "behavior_labels_used": False,
+            "label_format": (
+                "flyscope-pose-labels"
+                if Path(args.labels).suffix.lower() == ".json"
+                else "native-slp"
+            ),
         }
         meta["parent_weights_sha256"] = parent["weights_sha256"] if parent else None
         (out / "pose.json").write_text(json.dumps(meta, indent=2))

@@ -20,6 +20,8 @@ class EntrypointTests(unittest.TestCase):
                 ("pose_diagnostics.py", ["--help"]),
                 ("audit_comparison.py", ["--help"]),
                 ("plot_training.py", ["--help"]),
+                ("pose_labels.py", ["--help"]),
+                ("rescore_results.py", ["--help"]),
             ]:
                 result = subprocess.run(
                     [sys.executable, str(ROOT / "tools" / command), *arguments],
@@ -55,7 +57,14 @@ class EntrypointTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary, chdir(temporary):
             client = app.test_client()
-            for route in ("/ccrt", "/eggs", "/static/review.js", "/api/dataset-format"):
+            for route in (
+                "/ccrt",
+                "/eggs",
+                "/pose",
+                "/static/review.js",
+                "/static/pose.js",
+                "/api/dataset-format",
+            ):
                 with client.get(route) as response:
                     self.assertEqual(response.status_code, 200, route)
             with client.get("/static/comparaisons.json") as response:

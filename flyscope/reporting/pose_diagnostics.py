@@ -16,7 +16,7 @@ from flyscope.models.runtime import torch_setup, crop_rgb, pose_input
 from flyscope.training.pose import (
     read_meta,
     network,
-    centered_examples,
+    load_examples,
     infer_images,
     clear_cache,
     sha,
@@ -33,7 +33,7 @@ def diagnose(args):
     device = torch_setup(device=args.device)
     output.mkdir(parents=True)
     if args.labels:
-        nodes, examples, _ = centered_examples(args.labels, config["size"])
+        nodes, examples, _ = load_examples(args.labels, config["size"])
         if nodes != config["nodes"]:
             raise ValueError("Anatomical node names/order differ from the model.")
         # Default to the stored held-out identities when evaluating its source SLP.
@@ -49,6 +49,8 @@ def diagnose(args):
             precise = all("label_record" in e for e in identities)
 
             def identity(e):
+                if e.get("group_id"):
+                    return (e["group_id"], e["id"])
                 return (
                     e.get("video_sha256") or Path(e["video"]).name,
                     e["frame"],

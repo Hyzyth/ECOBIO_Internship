@@ -61,6 +61,21 @@ class DatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Expected a train"):
                 E.Dataset(test.root, "train")
 
+    def test_different_crops_of_same_source_cannot_cross_train_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train = self.make(root / "train", "train", shade=140)
+            test = self.make(root / "test", "test", "separate-grid", shade=180)
+            shared = hashlib.sha256(b"original full source image").hexdigest()
+            for data in [train, test]:
+                m = json.loads((data.root / "annotations.json").read_text())
+                m["images"][0]["source_sha256"] = shared
+                (data.root / "annotations.json").write_text(json.dumps(m))
+            with self.assertRaisesRegex(ValueError, "content hash"):
+                E.check_holdouts(
+                    E.Dataset(train.root, "train"), [E.Dataset(test.root, "test")]
+                )
+
     def test_plan_rejects_changed_manifest_and_partial_well_sample_selections(self):
         with tempfile.TemporaryDirectory() as out:
             root = Path(out)

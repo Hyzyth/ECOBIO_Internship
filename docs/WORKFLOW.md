@@ -93,7 +93,7 @@ Stop the running Flask server after updating the code, restart it with `python a
 
 ### Large experiments and exported files
 
-For thousands of frames, use **Save dataset to folder (large experiments)** in Chrome/Chromium or Edge. Choose a parent folder; the app creates a new `flyscope-ccrt-…` (or `flyscope-eggs-…`) subfolder and writes originals one at a time. Wait for **Dataset saved in …**. `dataset-complete.json` is written last; a cancelled/failed export folder must be exported again. Your app annotations are retained. Keep the source images until you have verified the saved dataset.
+For thousands of frames, use **Save dataset to folder (large experiments)** in Chrome/Chromium or Edge. Choose a parent folder; the app creates a new `flyscope-ccrt-…` (or `flyscope-eggs-…`) subfolder and writes dataset images one at a time. Wait for **Dataset saved in …**. `dataset-complete.json` is written last; a cancelled/failed export folder must be exported again. Your app annotations are retained. Keep the source images until you have verified the saved dataset.
 
 **Export training/test dataset ZIP** works in other browsers too. Large datasets are automatically divided into independent ZIP files around 256 MiB each, avoiding the old 4 GB / 65,535-file limit. Download links remain on the page until the next dataset export or navigation/reload. Download **every part**, then extract all parts into the **same empty directory**. These are ordinary ZIPs, not a multipart `.z01` archive. ZIP downloading does not create a folder automatically; check the browser's Downloads list if it starts automatically. Use the visible link if it does not. Very large individual metadata files need direct folder saving.
 
@@ -131,6 +131,12 @@ unzip /path/to/test.zip -d "$DATA_DIR/test-grid-1"
 ```
 
 Each extracted directory must directly contain `annotations.json` and `images/`. Do not edit an export after creating its plan: manifest/image hashes bind the exact data. Output directories must be new; training refuses to overwrite existing results.
+
+### Crop exported CCRT images to the well area
+
+The app defaults to the union of all wells and frame corrections, plus 32 reference-image pixels of padding. A constant normalized region keeps transformed geometry consistent across the sequence; original dimensions, crop transforms, original content hashes and exported-image hashes are saved. Different-resolution images can require resampling, explicitly recorded per frame. Disable the option for unchanged source files, or adjust padding. PNG is lossless; optional JPEG quality 98 is compact with explicit loss. PNG may be larger than the original JPEG despite fewer pixels. This does not create per-well/per-frame duplicate images.
+
+`project.json` remains an editable backup in **original coordinates**, for use with original images. `annotations.json` uses coordinates of the exported images. Do not use a cropped training folder as if it were the original image folder when resuming a project. Source hashes preserve holdout checks across different crops of the same original. Egg exports are unaffected.
 
 ## 5. Train the anatomical pose estimator
 
@@ -175,6 +181,32 @@ python tools/pose_diagnostics.py --pose-model "$DATA_DIR/pose-base" \
 Open each `report.html`. The first command uses stored held-out source identities when available; `--all-labels` explicitly includes potentially seen source data or a separately supplied anatomical-label dataset. The CCRT preview samples Coma/Awake/Empty separately and has **no anatomical accuracy score**: state labels are not keypoints. Inspect folded/hidden legs and belly-up flies. Add representative CCRT anatomical labels in SLEAP if transfer is poor, fine-tune, then repeat the checks before launching all forests. New behavior models abstain on absent/collapsed predicted poses; this screen cannot prove anatomical correctness.
 
 An old pose checkpoint trained on every source example cannot provide an unseen validation subset of that same source. For a new validated baseline retrain from scratch, or supply genuinely untouched anatomical labels. Fine-tuning rejects a proposed holdout already seen by its parent. Existing pose weights remain loadable for inference and diagnostics.
+
+### Fine-tune anatomy on your CCRT wells
+
+Public courtship pretraining does not establish accuracy on overhead comatose flies. Prepare examples from a **training grid**, never a final test grid:
+
+```bash
+python tools/pose_labels.py --dataset "$DATA_DIR/train-grid" \
+  --skeleton "$DATA_DIR/pose-base/pose.json" \
+  --count 96 --size 128 --output "$DATA_DIR/ccrt-pose-project"
+```
+
+`--size` must match the well crop resolution used by `model_suite --image-size`; the pose network's own resize is handled internally. Preparation samples different manual states, individuals and times, using reviewed single-individual geometry and actual inference preprocessing. Include Coma/Awake, edge/center, folded/extended legs and different orientations. `--wells W1 W3 W8` restricts preparation to chosen individuals. Behavior labels are context, never anatomical targets.
+
+Open **Pose annotation** (`http://127.0.0.1:5000/pose`), select the prepared folder, click visible anatomical nodes and explicitly mark hidden points Occluded. Left/right refer to the animal. Confirm completed examples and download the labeled ZIP. Extract it; save/import JSON to resume annotations. Incomplete examples are retained but do not train. Use at least two independent flies, preferably many more; validation holds out **whole individuals**, never adjacent frames of one fly.
+
+```bash
+python tools/sleap_pose.py train \
+  --labels "$DATA_DIR/ccrt-pose-labeled/pose-labels.json" \
+  --parent "$DATA_DIR/pose-base" --epochs 25 --learning-rate 0.0001 \
+  --device cuda --output "$DATA_DIR/pose-ccrt"
+python tools/pose_diagnostics.py --pose-model "$DATA_DIR/pose-ccrt" \
+  --labels "$DATA_DIR/ccrt-pose-labeled/pose-labels.json" \
+  --output "$DATA_DIR/pose-ccrt-validation"
+```
+
+The diagnostic uses the saved validation identities by default. Inspect its HTML, per-node PCK, pixel errors and overlays; low heatmap loss alone is insufficient. Retrain every forest selection from the same `pose-ccrt` base and unchanged behavior plan. Parent provenance rejects validation individuals already fitted by the parent. Native `.slp` labels remain supported. A Coma/Awake export alone cannot train anatomical localization: preparation plus manual point annotation supplies those targets.
 
 ## 6. Create the shared training and validation plan
 
@@ -251,7 +283,8 @@ After dataset/plan validation, the output directory contains:
 | --- | --- |
 | `progress.jsonl` | Incrementally flushed progress events, selected settings, device/GPU, artifact paths and failure/interruption reasons. |
 | `training.csv` | Every neural batch loss plus epoch means, architecture/selection/phase, counts, throughput, input wait and allocated/reserved GPU MiB. Buffered rows flush at progress messages and epoch completion. |
-| `loss.png` | Training and validation curves, refreshed after each completed epoch, with separate panels for appearance, optical flow, two-stream and TGM losses. |
+| `loss.png`, `loss-train.png`, `loss-validation.png` | Independent training/validation axes and standalone figures, refreshed after completed epochs. Three DeepEthogram stages are phases of one pipeline, not three final variants. |
+| `loss-forests.png` | Fitted forest training/validation NLL; forests have no epoch trajectory. New `fit_metrics` rows also contain balanced accuracy and Coma recall. |
 
 `elapsed_s` and `input_wait_s` in training rows describe the current epoch; ETA estimates its remaining time. Input wait measures time waiting for prepared CPU batches. CUDA work is asynchronous, so these are throughput diagnostics, not a GPU kernel profiler. Phase losses have different meanings/scales. There is no SLEAP/RF gradient-loss curve: its forests are fitted on fixed pose features. These logs **do not use held-out test data as validation loss**.
 
@@ -264,7 +297,7 @@ python tools/plot_training.py \
   --output "$DATA_DIR/comparison-full/training-loss.svg"
 ```
 
-The plot command needs at least one completed epoch; batch losses are readable in the CSV immediately. To also retain messages from initial verification and full Python tracebacks on Linux, use `set -o pipefail` and append `2>&1 | tee "$DATA_DIR/comparison-full-console.log"` to the compare command. The Python progress records themselves flush without requiring `python -u`.
+The plot command needs a completed epoch or fitted forest metrics; batch losses are readable in the CSV immediately. To also retain messages from initial verification and full Python tracebacks on Linux, use `set -o pipefail` and append `2>&1 | tee "$DATA_DIR/comparison-full-console.log"` to the compare command. The Python progress records themselves flush without requiring `python -u`.
 
 The old trainer repeatedly decoded full-grid images for randomly ordered single-well crops and only printed at epoch completion. A long silence after the ImageNet download did not establish that it was stuck. The new default prepares a **reusable, memory-mapped uint8 crop cache**, decoding each required source frame once, then reading the same masked crops across epochs and selections. Selected fitting and validation wells and their causal context enter this label-free cache. Validation pixels never enter gradient updates; tests never fit it. Hash verification still runs on every command. Preparation is CPU/disk work, so low GPU usage during that phase is expected.
 
@@ -272,7 +305,7 @@ The cache defaults to `$DATA_DIR/.flyscope-training-cache` when output is direct
 
 Bounded CPU prefetch overlaps input preparation with training (`--prefetch-batches 2`, `0` to disable), with pinned uint8 CUDA transfers for ResNet/DeepEthogram training. `--cache-workers 2` controls initial frame preparation, not model training. Keep the cache on a local SSD when possible. Temporal feature extraction is batched and fixed features remain on disk rather than accumulating in GPU memory. GPU memory usage is not a utilization target: a small ResNet with batch size 4 can legitimately occupy much less than 12 GB. Increase batch size gradually while comparing samples/second; SLEAP/RF fitting, image verification and cache preparation will still have low GPU utilization. Restart with the updated code to obtain these features; an already running process cannot acquire new logging or caching.
 
-Defaults fine-tune ImageNet backbones; `--initialization scratch` starts fresh weights. Each run restarts independently from the common base, never the preceding subset's CCRT weights. The temporal model uses current/past analysis frames from selected individuals; no setup/future frames or unselected wells enter targets. Missing interior context/geometry is an explicit error.
+Defaults fine-tune ImageNet backbones; `--backbone frozen` is an explicit low-data ablation that freezes feature CNNs, with heads and temporal/motion modules still trained. It requires ImageNet initialization. Compare on validation before freezing a final protocol; no improvement is presumed. `--initialization scratch` starts fresh weights. Each run restarts independently from the common base, never the preceding subset's CCRT weights. The temporal model uses current/past analysis frames from selected individuals; no setup/future frames or unselected wells enter targets. Missing interior context/geometry is an explicit error.
 
 `--device cuda` requires the GPU; `cpu` is the tested fallback and `auto` chooses CUDA when available.
 
@@ -307,6 +340,17 @@ python tools/model_suite.py evaluate --models "$DATA_DIR/comparison-pilot" \
 Only list existing test directories. Experiment IDs/image hashes prevent train/test overlap. Renaming the same physical grid does not make it independent. Fully/partly annotated test grids are accepted: all available wells receive predictions; only eligible human targets are scored. Missing truth is never a negative recovery.
 
 Open `comparison.html` for the sortable comparison. `summary.csv`/`summary.json` identify architecture, selection, immutable version and test grid. Per-grid JSON contains raw/decision confusion matrices, class precision/recall/F1/support, accuracy, coverage/accuracy when decided, false-Awake counts, species strata, calibration/Brier/ECE, defined ROC-AUC/AP and recovery frame errors/censoring. CCRT seconds require known timing. Uncertain/censored truth does not become an exact event error. Results remain separate per held-out grid so grid-to-grid variation stays visible.
+
+### Correct CCRT scores from existing results without retraining
+
+```bash
+python tools/rescore_results.py --results "$DATA_DIR/final-evaluation" \
+  --output "$DATA_DIR/final-evaluation-ccrt-v2" --tolerances 1 5 10 30 60
+python tools/plot_training.py --models "$DATA_DIR/comparison-full" \
+  --output "$DATA_DIR/checkpoint-loss.png"
+```
+
+The first command reads saved predictions, preserves their policies, and writes compact `summary.csv/json`, `comparison.html`, `recovery-wells.csv`, `recovery-audit.json` and source-file fingerprints. Old evaluations lacking timing metadata get frame-based scores only. **Within ±X frames counts every exact human recovery, including missing model events as failures.** MAE/median are conditional on detected events and must be read with detection coverage. Human annotation gaps yield a separate interval-distance measure. Model Unsure before Awake no longer silently excludes bad estimates. The second command reads `model.json` histories without loading weights; old forest training NLL stays absent if it was never recorded.
 
 ## 9. Load trained weights in the app
 
@@ -389,3 +433,19 @@ done
 For the audit of the first 45-checkpoint experiment, see [TRAINING_REVIEW.md](TRAINING_REVIEW.md). For the source-code and artifact map, see [MAINTAINING.md](MAINTAINING.md).
 
 Repository cleanup: the working directory is now the repository root, not the former versioned app folder. The `tools/...` command names and exported dataset/model formats remain supported. Restart Flask after updating. Existing environments or user datasets left in the old local folder are not migrated by Git; retain your data and activate/recreate your environment deliberately. See [MAINTAINING.md](MAINTAINING.md) for the actual package layout.
+
+### Windows CPU procedure (not yet validated on Windows)
+
+Install Python 3.12.12, open PowerShell in the repository, then:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+python -m pip check
+python tools/check_runtime.py --prepare-models
+$env:FLYSCOPE_SUITE_MODELS_DIR = "C:\Data\comparison-full"
+python app.py
+```
+
+Use an OS-appropriate activation policy if PowerShell blocks activation, or call `.\.venv\Scripts\python.exe` directly. Do not copy a Linux virtual environment to Windows. The code is a local Python application, not an `.exe`. See the [French team handover](BILAN_CCRT_FR.md) and [second training review](SECOND_TRAINING_REVIEW.md).

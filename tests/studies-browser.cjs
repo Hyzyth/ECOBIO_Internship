@@ -120,6 +120,7 @@ for i in range(3):
   );
   await step(page, "export");
   await openOptions(page, "trainingOptions");
+  await page.locator("#cropDataset").uncheck();
   await page.locator("#experiment").fill("synthetic-ccrt-run");
   await page.locator("#experiment").press("Tab");
   await download("machine", "ccrt-machine.zip");

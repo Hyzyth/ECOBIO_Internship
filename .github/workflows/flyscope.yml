@@ -118,5 +118,6 @@ jobs:
           node tests/detection-browser.cjs
           node tests/long-sequence-browser.cjs
           node tests/studies-browser.cjs
+          node tests/pose-spatial-browser.cjs
           node tests/experiments-browser.cjs
           node tests/model-suite-browser.cjs

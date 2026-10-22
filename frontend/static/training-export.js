@@ -263,40 +263,97 @@
       images = [],
       task = ReviewCore.taskOf(project),
       frames = ReviewCore.analysisIndices(project);
-    // One original per frame. All model loaders derive masked crops lazily.
+    let roi = null;
+    const cropEnabled = task === "ccrt" && options.cropToWells;
+    const cropEncoding = options.cropEncoding || "png";
+    if (cropEnabled && !["png", "jpeg"].includes(cropEncoding))
+      throw Error("Invalid crop encoding.");
+    const hash = async (blob) =>
+      Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest("SHA-256", await blob.arrayBuffer()),
+        ),
+        (b) => b.toString(16).padStart(2, "0"),
+      ).join("");
+    // One image per frame. All model loaders derive masked crops lazily.
     // Work is linear in frames + annotations, never frames × annotations.
     for (const [n, i] of frames.entries()) {
       if (cancelled()) throw Error("Dataset export cancelled.");
-      const file = files[i],
-        ext =
-          file.name.match(/\.(png|jpe?g|bmp|webp)$/i)?.[1].toLowerCase() ||
-          "bin",
-        imagePath = `images/frame-${String(i + 1).padStart(6, "0")}.${ext}`;
+      const file = files[i];
+      let ext =
+        file.name.match(/\.(png|jpe?g|bmp|webp)$/i)?.[1].toLowerCase() || "bin";
       const { image, release } = await decode(file);
       try {
-        const sha = Array.from(
-          new Uint8Array(
-            await crypto.subtle.digest("SHA-256", await file.arrayBuffer()),
-          ),
-          (b) => b.toString(16).padStart(2, "0"),
-        ).join("");
+        const sourceSha = await hash(file);
+        let blob = file,
+          width = image.width,
+          height = image.height,
+          spatial = null;
+        if (cropEnabled) {
+          roi ||= SpatialExport.bounds(
+            project,
+            width,
+            height,
+            options.cropPadding ?? 32,
+          );
+          const [x, y, w, h] = [
+            roi[0] * width,
+            roi[1] * height,
+            roi[2] * width,
+            roi[3] * height,
+          ];
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, Math.round(w));
+          canvas.height = Math.max(1, Math.round(h));
+          canvas
+            .getContext("2d")
+            .drawImage(image, x, y, w, h, 0, 0, canvas.width, canvas.height);
+          blob = await new Promise((resolve, reject) =>
+            canvas.toBlob(
+              (v) =>
+                v ? resolve(v) : reject(Error("Image crop encoding failed.")),
+              `image/${cropEncoding}`,
+              0.98,
+            ),
+          );
+          ext = cropEncoding === "jpeg" ? "jpg" : "png";
+          spatial = {
+            source_x: x,
+            source_y: y,
+            source_width: w,
+            source_height: h,
+            original_width: width,
+            original_height: height,
+            encoding: cropEncoding,
+            resampled: [x, y, w, h].some(
+              (v) => Math.abs(v - Math.round(v)) > 1e-6,
+            ),
+          };
+          width = canvas.width;
+          height = canvas.height;
+        }
+        const imagePath = `images/frame-${String(i + 1).padStart(6, "0")}.${ext}`;
         images.push({
           ...ReviewCore.frameTiming(project, i),
           frame_index: i,
           original_filename: project.frames[i].name,
           timestamp: project.frames[i].timestamp,
           path: imagePath,
-          width: image.width,
-          height: image.height,
-          sha256: sha,
+          width,
+          height,
+          sha256: spatial ? await hash(blob) : sourceSha,
+          source_sha256: sourceSha,
+          source_size_bytes: file.size,
+          exported_size_bytes: blob.size,
+          ...(spatial ? { spatial_crop: spatial } : {}),
         });
         if (options.directory)
           await writeEntry(
             options.directory,
-            { name: imagePath, blob: file },
+            { name: imagePath, blob },
             cancelled,
           );
-        else entries.push({ name: imagePath, blob: file });
+        else entries.push({ name: imagePath, blob });
       } finally {
         release();
       }
@@ -314,6 +371,15 @@
       geometry_format: "shared-well-boundaries-v1",
       completion_marker: "dataset-complete.json",
       crop_storage: "derived-on-load",
+      spatial_export: roi
+        ? {
+            normalized_region: roi,
+            padding_pixels: options.cropPadding ?? 32,
+            reference_width: images[0].spatial_crop.original_width,
+            reference_height: images[0].spatial_crop.original_height,
+            encoding: cropEncoding,
+          }
+        : null,
       role,
       kind: `${task}-${role === "test" ? "test" : "training"}`,
       task,
@@ -358,8 +424,15 @@
         occupancy: w.occupancy || "unknown",
         species:
           w.occupancy === "empty" ? null : w.species || project.species || null,
-        points: w.points,
-        overrides: w.overrides || {},
+        points: roi ? SpatialExport.transform(w.points, roi) : w.points,
+        overrides: roi
+          ? Object.fromEntries(
+              Object.entries(w.overrides || {}).map(([i, points]) => [
+                i,
+                SpatialExport.transform(points, roi),
+              ]),
+            )
+          : w.overrides || {},
         active_frames: w.active_frames || null,
         review_required: !!w.detection.review_required,
         review_frames: w.review_frames || [],
@@ -399,6 +472,7 @@
       eligible_sample_count: annotations.filter((a) => a.eligible_for_training)
         .length,
       notes: [
+        "Spatial export metadata maps cropped coordinates back to the original source image. Source hashes preserve train/test overlap checks across different crops. Project backup coordinates remain original.",
         "Targets come exclusively from manual annotations. Unannotated frame/wells are omitted.",
         "Uncertain, partial, unreviewed, and CCRT multiple/obscured/unconfirmed occupancy samples are retained with eligibility=false. Explicit Empty occupancy is a manual occupancy target, not a coma/awake label.",
         "Split related experiments together. Do not randomly split adjacent frames or wells from the same experiment.",
@@ -440,8 +514,8 @@
       name: "README.txt",
       text:
         role === "test"
-          ? "FlyScope evaluation-only dataset. Original images and manual annotations/geometry only; no duplicate crops, project history or training extras. Use tools/model_experiments.py evaluate or compare. Score only eligible annotated wells; unannotated wells are never negatives. This is not an editable project backup. Keep this grid separate from training.\n"
-          : "FlyScope training dataset: original images, shared well boundaries, manual targets, geometry, provenance and project backup. Partial annotations are supported; unannotated wells are omitted. Empty is a manual occupancy target; coma/awake requires one individual. Keep comparison-plan.json identical across models; each run selects entire wells, only their eligible labels, and fixed seeds. Poor/rich well IDs are experiment selections, not special annotation notes. Unzip then use tools/model_experiments.py; see repository README. Crops are derived lazily by dataset.py and every model trainer; no duplicate per-well PNGs are required. Extract ALL ZIP parts into the SAME empty directory before training. See WORKFLOW.md.\n",
+          ? "FlyScope evaluation-only dataset. Dataset images and manual annotations/geometry only; no duplicate crops, project history or training extras. Use tools/model_experiments.py evaluate or compare. Score only eligible annotated wells; unannotated wells are never negatives. This is not an editable project backup. Keep this grid separate from training.\n"
+          : "FlyScope training dataset: dataset images, shared well boundaries, manual targets, geometry, provenance and project backup. Partial annotations are supported; unannotated wells are omitted. Empty is a manual occupancy target; coma/awake requires one individual. Keep comparison-plan.json identical across models; each run selects entire wells, only their eligible labels, and fixed seeds. Poor/rich well IDs are experiment selections, not special annotation notes. Unzip then use tools/model_experiments.py; see repository README. Crops are derived lazily by dataset.py and every model trainer; no duplicate per-well PNGs are required. Extract ALL ZIP parts into the SAME empty directory before training. See WORKFLOW.md.\n",
     });
     entries.push({
       name: "dataset-complete.json",
