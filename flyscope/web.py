@@ -34,6 +34,11 @@ def eggs():
     return render_template("index.html", study="eggs")
 
 
+@app.get("/pose")
+def pose_annotation():
+    return render_template("pose.html")
+
+
 @app.get("/api/models")
 def models():
     return jsonify(available_models())

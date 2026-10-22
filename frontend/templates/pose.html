@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FlyScope · Anatomical annotation</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="/static/training-export.js"></script>
+    <script defer src="/static/pose.js"></script>
+    <style>
+      .pose-layout {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        gap: 24px;
+      }
+      .pose-view canvas {
+        width: min(80vw, 640px);
+        height: auto;
+        image-rendering: auto;
+        cursor: crosshair;
+      }
+      .pose-view {
+        min-width: 0;
+      }
+      #poseNodes button {
+        width: 100%;
+        text-align: left;
+        margin: 3px 0;
+      }
+      #poseNodes button[aria-current="true"] {
+        outline: 2px solid #76dbc5;
+      }
+      #poseNodes {
+        max-height: 480px;
+        overflow: auto;
+      }
+      .pose-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      @media (max-width: 800px) {
+        .pose-layout {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>FlyScope <small>Anatomical annotation</small></h1>
+      <nav>
+        <a href="/ccrt">CCRT</a><a href="/eggs">Egg counting</a
+        ><a href="/pose" aria-current="page">Pose annotation</a>
+      </nav>
+    </header>
+    <main class="pose-layout">
+      <aside>
+        <h2>1 · Open a prepared project</h2>
+        <p>
+          Run
+          <code
+            >python tools/pose_labels.py --dataset PATH --output
+            NEW_FOLDER</code
+          >, then select that folder. Images stay in this browser.
+        </p>
+        <input id="poseFolder" type="file" webkitdirectory multiple /><label
+          >Resume saved annotations<input
+            id="poseImport"
+            type="file"
+            accept="application/json"
+        /></label>
+        <h2>2 · Mark anatomy</h2>
+        <p>
+          Click a node below, then its visible position on the fly. Left/right
+          refer to the fly’s anatomy. Mark hidden or unresolvable nodes
+          Occluded; do not guess.
+        </p>
+        <div id="poseNodes"></div>
+        <button id="poseOccluded" disabled>Mark selected node occluded</button
+        ><button id="poseClear" class="secondary" disabled>
+          Clear selected node</button
+        ><label
+          ><input id="poseReviewed" type="checkbox" disabled /> Confirm all
+          points on this image were manually reviewed</label
+        >
+        <h2>3 · Save</h2>
+        <button id="poseSave" disabled>Download annotations JSON</button
+        ><button id="poseZip" class="secondary" disabled>
+          Download labeled dataset ZIP
+        </button>
+        <p>
+          The trainer accepts partial annotation: only reviewed examples with
+          visible keypoints train. Keep separate individuals for validation.
+          Coma/Awake text is context, never a keypoint label.
+        </p>
+      </aside>
+      <section class="pose-view">
+        <p id="poseStatus" role="status">No project loaded.</p>
+        <div class="pose-actions">
+          <button id="posePrev" disabled>← Previous</button
+          ><select id="poseExample" aria-label="Example" disabled></select
+          ><button id="poseNext" disabled>Next →</button>
+        </div>
+        <p id="poseCaption"></p>
+        <canvas
+          id="poseCanvas"
+          width="512"
+          height="512"
+          aria-label="Fly anatomical keypoint canvas"
+        ></canvas>
+        <p>
+          Visible points are green; selected points are yellow. The image is the
+          exact crop used by the pose estimator, not a screenshot.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

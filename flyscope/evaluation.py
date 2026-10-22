@@ -126,6 +126,10 @@ def evaluate_model(path, test, device="auto", progress=None):
                 meta["recovery_policy"], test.manifest.get("interval")
             ),
             "test_dataset_sha256": test.sha,
+            "test_timing": {
+                k: test.manifest.get(k)
+                for k in ("mode", "interval", "time_origin", "experiment_id")
+            },
             "test_experiment": test.manifest["experiment_id"],
             "metrics": metrics(output, test.manifest),
             "predictions": output,

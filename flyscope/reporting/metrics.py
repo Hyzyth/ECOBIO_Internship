@@ -81,7 +81,7 @@ def first_recovery(rows, truth=False):
     }
 
 
-def metrics(rows, manifest):
+def metrics(rows, manifest, tolerances=(1, 5, 10, 30, 60)):
     overall = classification(rows)
     raw = classification(rows, "raw_prediction")
     truth_support = {
@@ -151,63 +151,9 @@ def metrics(rows, manifest):
         )
         for name in sorted({r.get("species") or "not specified" for r in rows})
     }
-    recovery = []
-    for uid in (
-        sorted({r["well_id"] for r in rows})
-        if manifest.get("mode") == "sequence"
-        else []
-    ):
-        well = [r for r in rows if r["well_id"] == uid]
-        if not any(r["scored"] for r in well):
-            continue
-        truth = first_recovery(well, True)
-        predicted = first_recovery(well)
-        error = None
-        if truth["status"] == "observed" and predicted["status"] == "observed":
-            error = predicted["frame_index"] - truth["frame_index"]
-        origin = manifest.get("time_origin") or {}
-        interval = manifest.get("interval")
+    from .recovery_metrics import recovery_metrics
 
-        def seconds(event):
-            return (
-                origin.get("offset_seconds", 0) + event["frame_index"] * interval
-                if origin.get("confirmed")
-                and interval
-                and event["status"] == "observed"
-                else None
-            )
-
-        recovery.append(
-            {
-                "well_uid": uid,
-                "well_id": well[0]["well_name"],
-                "species": well[0].get("species"),
-                "ground_truth": truth,
-                "predicted": predicted,
-                "error_frames": error,
-                "ground_truth_ccrt_seconds": seconds(truth),
-                "predicted_ccrt_seconds": seconds(predicted),
-                "missed_recovery": truth["status"] == "observed"
-                and predicted["frame_index"] is None,
-                "false_recovery": predicted["frame_index"] is not None
-                and truth["status"] == "not_observed",
-            }
-        )
-    errors = [r["error_frames"] for r in recovery if r["error_frames"] is not None]
-    recovery_summary = {
-        "paired_observed_wells": len(errors),
-        "mae_frames": float(np.mean(np.abs(errors))) if errors else None,
-        "bias_frames": float(np.mean(errors)) if errors else None,
-        "missed_recoveries": sum(r["missed_recovery"] for r in recovery),
-        "false_recoveries": sum(r["false_recovery"] for r in recovery),
-        "censored_predicted_recoveries": sum(
-            r["predicted"]["status"] == "already_awake_left_censored" for r in recovery
-        ),
-        "uncertain_predicted_recoveries": sum(
-            r["predicted"]["status"] == "uncertain_interval" for r in recovery
-        ),
-        "wells": recovery,
-    }
+    recovery_summary = recovery_metrics(rows, manifest, first_recovery, tolerances)
     return {
         "overall": {
             k: v for k, v in overall.items() if k not in ["confusion", "classes"]
@@ -243,7 +189,7 @@ def metrics(rows, manifest):
             "Only eligible human annotations are scored. Unannotated wells are never negatives.",
             "Decision accuracy includes abstentions as incorrect; coverage and accuracy_when_decided expose that tradeoff.",
             "Raw metrics score original frame probabilities before confidence/streak/irreversibility rules.",
-            "Recovery frame errors use paired observed transitions; censored or uncertain truth is excluded.",
+            "CCRT errors use human recovery bounds. Missing estimates fail tolerance success; prediction Unsure gaps do not exclude an onset.",
             "Confidence thresholds and streak lengths are fixed before held-out evaluation; no test calibration or tuning occurs.",
         ],
     }
@@ -279,6 +225,18 @@ def write_comparison(results, out):
                 "infer_matching_gaps": m["recovery_policy"].get(
                     "infer_matching_gaps", False
                 ),
+                "measurable_recoveries": metrics["recovery"].get(
+                    "measurable_truth_recoveries"
+                ),
+                "recovery_coverage": metrics["recovery"].get("event_coverage"),
+                "recovery_median_error_frames": metrics["recovery"].get(
+                    "median_absolute_error_frames"
+                ),
+                "early_recoveries": metrics["recovery"].get("early_recoveries"),
+                **{
+                    f"ccrt_within_{t}_frames": v["fraction"]
+                    for t, v in metrics["recovery"].get("within_tolerance", {}).items()
+                },
                 **metrics["overall"],
                 "raw_accuracy": metrics["raw"]["accuracy"],
                 "raw_balanced_accuracy": metrics["raw"]["balanced_accuracy"],
@@ -318,23 +276,61 @@ def write_comparison(results, out):
                     for k, v in row.items()
                 }
             )
+    event_rows = []
+    for result in results:
+        for well in result["metrics"]["recovery"]["wells"]:
+            event_rows.append(
+                {
+                    "model": result["model"]["architecture"],
+                    "run": result["model"]["selection"]["id"],
+                    "test_grid": result["test_experiment"],
+                    "well": well["well_id"],
+                    "truth": well.get(
+                        "truth_measurement", well["ground_truth"]["status"]
+                    ),
+                    "truth_bounds": well.get("truth_bounds_frames"),
+                    "estimated_frame_index": well["predicted"]["frame_index"],
+                    "error_frames": well["error_frames"],
+                    "interval_distance_frames": well.get(
+                        "distance_to_truth_interval_frames"
+                    ),
+                    "missed": well["missed_recovery"],
+                    "early": well.get("early_recovery"),
+                    "false_event": well["false_recovery"],
+                }
+            )
+    with (out / "recovery-wells.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(
+            stream, fieldnames=list(event_rows[0]) if event_rows else []
+        )
+        writer.writeheader()
+        writer.writerows(
+            {
+                k: (
+                    "'" + v
+                    if isinstance(v, str) and v.startswith(("=", "+", "-", "@"))
+                    else v
+                )
+                for k, v in row.items()
+            }
+            for row in event_rows
+        )
     columns = [
         "model",
         "run",
         "test_grid",
         "selected_wells",
-        "accuracy",
-        "macro_f1",
-        "coverage",
-        "accuracy_when_decided",
-        "raw_macro_f1",
-        "raw_coma_recall",
-        "always_awake_accuracy",
+        "measurable_recoveries",
+        "recovery_coverage",
         "recovery_mae_frames",
+        "recovery_median_error_frames",
         "paired_recovery_wells",
-        "initial_awake_wells",
-        "false_awake",
+        "early_recoveries",
+        "missed_recoveries",
+        "false_recoveries",
     ]
+    columns += [k for k in (rows[0] if rows else {}) if k.startswith("ccrt_within_")]
+    columns += ["raw_accuracy", "raw_coma_recall", "coverage"]
     table = (
         "<table><thead><tr>"
         + "".join("<th>" + html.escape(c.replace("_", " ")) + "</th>" for c in columns)
@@ -361,7 +357,7 @@ def write_comparison(results, out):
         )
     table += "</tbody></table>"
     document = (
-        """<!doctype html><html><head><meta charset="utf-8"><title>CCRT model comparison</title><style>body{font:15px system-ui;margin:32px}table{border-collapse:collapse}td,th{padding:12px;border:1px solid #ccc;text-align:left}th{cursor:pointer;background:#edf3f7}p{max-width:900px}</style></head><body><h1>Held-out CCRT model comparison</h1><p>Every architecture uses the same saved well selections. Accuracy includes Unsure decisions; coverage and accuracy when decided show abstention. Raw F1 measures appearance/pose/temporal classification before the irreversible recovery policy. Recovery MAE excludes censored or uncertain ground truth. Click a column to sort.</p>"""
+        """<!doctype html><html><head><meta charset="utf-8"><title>CCRT model comparison</title><style>body{font:15px system-ui;margin:32px}table{border-collapse:collapse}td,th{padding:12px;border:1px solid #ccc;text-align:left}th{cursor:pointer;background:#edf3f7}p{max-width:900px}</style></head><body><h1>Held-out CCRT model comparison</h1><p>Every architecture uses the same saved well selections. Accuracy includes Unsure decisions; coverage and accuracy when decided show abstention. CCRT timing is the primary endpoint. Within-tolerance success includes missed events as failures; MAE is conditional on detected events and exact human truth. Prediction Unsure gaps do not exclude an onset. Raw frame classification is a secondary diagnostic. Click a column to sort.</p>"""
         + table
         + """<p>See per-grid JSON for confusion matrices, class/species metrics, calibration, original probabilities, frame IDs and recovery censoring. summary.csv contains the full comparison table.</p><script>document.querySelectorAll('th').forEach((h,i)=>h.onclick=()=>{const b=document.querySelector('tbody'),r=[...b.rows];r.sort((a,c)=>{const x=a.cells[i].textContent,y=c.cells[i].textContent;return !isNaN(+x)&&!isNaN(+y)?+y-+x:x.localeCompare(y)});r.forEach(t=>b.append(t))})</script></body></html>"""
     )

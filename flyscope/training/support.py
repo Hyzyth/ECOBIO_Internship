@@ -28,6 +28,8 @@ class Progress:
         "total_samples",
         "loss",
         "validation_loss",
+        "training_balanced_accuracy",
+        "training_coma_recall",
         "validation_balanced_accuracy",
         "validation_coma_recall",
         "validation_pck_005",
@@ -87,6 +89,12 @@ class Progress:
         self.csv.writerow(row)
         self.epochs.append(row)
         self.emit("epoch", force=True, **values)
+
+    def fit_metrics(self, **values):
+        row = {"event": "fit_metrics", **values}
+        self.csv.writerow(row)
+        self.epochs.append(row)
+        self.emit("fit_metrics", force=True, **values)
 
     def plot(self):
         self.table.flush()

@@ -83,6 +83,7 @@ def train_model(kind, data, run, out, args):
     validation_losses = {}
     selected_epochs = {}
     validation_result = None
+    fit_result = None
     validation_probabilities = None
     validation_eligible = None
     progress.emit(
@@ -185,13 +186,26 @@ def train_model(kind, data, run, out, args):
             "state_features": "normalized keypoint distances, visibility and confidence only",
             "occupancy_features": "relative foreground components only",
         }
+
+        def probabilities_for(model, x):
+            result = np.zeros((len(x), 3))
+            result[:, model.classes_.astype(int)] = model.predict_proba(x)
+            return result
+
+        occupied_fit = probabilities_for(
+            occupancy, np.stack([data.sample(k, args.image_size)[1] for k in ids])
+        )
+        states_fit = (
+            probabilities_for(forest, np.stack(features[: len(ids)]))
+            if state_indices
+            else np.zeros((len(ids), 3))
+        )
+        fit_probabilities = states_fit * occupied_fit[:, 0, None]
+        fit_probabilities[:, 2] = occupied_fit[:, 2]
+        fit_result = validation_metrics(
+            fit_probabilities, labels, [fit_weights[k] for k in ids]
+        )
         if validation_ids:
-
-            def probabilities_for(model, x):
-                result = np.zeros((len(x), 3))
-                result[:, model.classes_.astype(int)] = model.predict_proba(x)
-                return result
-
             occupied = probabilities_for(
                 occupancy,
                 np.stack([data.sample(k, args.image_size)[1] for k in validation_ids]),
@@ -220,12 +234,35 @@ def train_model(kind, data, run, out, args):
                 phase="random_forests",
                 **validation_result,
             )
+        progress.fit_metrics(
+            **context,
+            phase="random_forests",
+            loss=fit_result["balanced_nll"],
+            validation_loss=(validation_result or {}).get("balanced_nll"),
+            training_balanced_accuracy=fit_result["balanced_accuracy"],
+            training_coma_recall=fit_result["class_recall"].get("coma"),
+            validation_balanced_accuracy=(validation_result or {}).get(
+                "balanced_accuracy"
+            ),
+            validation_coma_recall=(validation_result or {})
+            .get("class_recall", {})
+            .get("coma"),
+        )
+        progress.plot()
     else:
         network = (
             make_resnet(args.initialization)
             if kind == "resnet18"
             else make_deepethogram(args.window, args.initialization)
         )
+        if args.backbone == "frozen":
+            if kind == "resnet18":
+                for name, parameter in network.named_parameters():
+                    parameter.requires_grad = name.startswith("fc.")
+            else:
+                for backbone in (network.spatial, network.flow):
+                    for parameter in backbone.parameters():
+                        parameter.requires_grad = False
         network.to(device)
         criterion = torch.nn.CrossEntropyLoss(reduction="none")
 
@@ -438,7 +475,7 @@ def train_model(kind, data, run, out, args):
         if kind == "resnet18":
             validation_probabilities = optimize(
                 "appearance",
-                network.parameters(),
+                [p for p in network.parameters() if p.requires_grad],
                 args.epochs,
                 lambda batch, inputs: classification_loss(
                     network(normalize(device_tensor(inputs, device))), batch
@@ -490,7 +527,7 @@ def train_model(kind, data, run, out, args):
                 [
                     p
                     for n, p in network.named_parameters()
-                    if not n.startswith(("motion.", "temporal."))
+                    if p.requires_grad and not n.startswith(("motion.", "temporal."))
                 ],
                 args.epochs,
                 lambda batch, inputs: classification_loss(
@@ -681,6 +718,7 @@ def train_model(kind, data, run, out, args):
             if kind != "sleap-rf"
             else "fixed external SLEAP pose model"
         ),
+        "backbone_mode": args.backbone if kind != "sleap-rf" else None,
         "pose_parent_sha256": (
             digest(pose_source / "pose.pt") if pose_source else None
         ),
@@ -710,6 +748,7 @@ def train_model(kind, data, run, out, args):
             "batch_size": batch_size,
             "false_awake_cost": args.false_awake_cost,
             "loss": losses,
+            "fit_metrics": fit_result,
             "validation_loss": validation_losses,
             "balancing": args.balance,
             "weight_decay": args.weight_decay,

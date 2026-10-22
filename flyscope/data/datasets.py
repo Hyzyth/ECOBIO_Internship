@@ -65,6 +65,15 @@ class Dataset:
             if actual != image["sha256"]:
                 raise ValueError("Image content does not match the export hash.")
             self.image_hashes.add(actual)
+            # Different spatial crops of the same original are still the same
+            # experimental image, and must never cross a train/test boundary.
+            source_hash = image.get("source_sha256")
+            if source_hash is not None:
+                if not isinstance(source_hash, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", source_hash
+                ):
+                    raise ValueError("Invalid source image hash.")
+                self.image_hashes.add(source_hash)
             if progress:
                 progress(
                     "verifying_images",

@@ -101,3 +101,7 @@ independent validation and cached/uncached equivalence. CI additionally trains a
 fine-tunes native SLEAP weights and exercises app imports, large exports and model
 inference. These establish software contracts; accuracy claims need independent
 experimental grids and a fixed final-test protocol.
+
+## Anatomy and recovery reporting
+
+`flyscope/data/pose_labels.py` prepares/validates exact CCRT anatomical inputs. The standalone `/pose` page uses `frontend/static/pose.js`; it never treats behavior labels as keypoints. `training/pose_quality.py` holds out complete annotated individuals. `reporting/recovery_metrics.py` defines event populations and timing tolerances; `reporting/rescore.py` reuses it for historical predictions. Keep human truth eligibility independent from model confidence. `frontend/static/spatial-export.js` owns the coordinate transform; `Dataset.image_hashes` retains both source/export hashes to prevent leakage after cropping. Project backups remain in source coordinates.

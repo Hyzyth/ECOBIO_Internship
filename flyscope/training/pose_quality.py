@@ -18,7 +18,9 @@ def split_examples(examples, fraction=0.2, seed=2026, gap=10):
         )
 
     def video_id(example):
-        return example[3].get("video_sha256", example[3]["video"])
+        return example[3].get("group_id") or example[3].get(
+            "video_sha256", example[3]["video"]
+        )
 
     videos = sorted({video_id(e) for e in examples})
     rng = random.Random(seed)
@@ -29,8 +31,14 @@ def split_examples(examples, fraction=0.2, seed=2026, gap=10):
         )
         validation = [e for e in examples if video_id(e) in chosen]
         fit = [e for e in examples if video_id(e) not in chosen]
-        unit, purged = "whole video", []
+        unit, purged = (
+            "whole individual" if examples[0][3].get("group_id") else "whole video"
+        ), []
     else:
+        if examples[0][3].get("group_id"):
+            raise ValueError(
+                "Anatomical CCRT validation needs at least two independently annotated individuals; more frames of one fly are not independent validation."
+            )
         frames = sorted({e[3]["frame"] for e in examples})
         if len(frames) < 2:
             raise ValueError(

@@ -6,6 +6,12 @@ Point lists are shared in memory, never copied for every frame/annotation.
 
 
 def hydrate_manifest(manifest):
+    # Browser exports use frame_interval_seconds; keep one internal spelling.
+    if (
+        "interval" not in manifest
+        and manifest.get("frame_interval_seconds") is not None
+    ):
+        manifest["interval"] = manifest["frame_interval_seconds"]
     if manifest.get("geometry_format") != "shared-well-boundaries-v1":
         return manifest
     images = {im["frame_index"]: im for im in manifest["images"]}

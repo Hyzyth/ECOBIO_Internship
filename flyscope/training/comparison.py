@@ -101,6 +101,12 @@ def main(argv=None):
     compare.add_argument(
         "--initialization", choices=["imagenet", "scratch"], default="imagenet"
     )
+    compare.add_argument(
+        "--backbone",
+        choices=["finetune", "frozen"],
+        default="finetune",
+        help="Controlled low-data ablation: frozen keeps ImageNet feature CNNs fixed; only heads/motion/temporal modules train",
+    )
     compare.add_argument("--rf-trees", type=int, default=200)
     compare.add_argument("--false-awake-cost", type=float, default=2)
     compare.add_argument(
@@ -236,6 +242,10 @@ def main(argv=None):
             )
         ):
             raise ValueError("Invalid training parameters.")
+        if args.backbone == "frozen" and args.initialization != "imagenet":
+            raise ValueError(
+                "A frozen backbone requires ImageNet initialization; do not freeze random features."
+            )
         data = TrainingData(args.train, announce)
         if "deepethogram" in args.architectures and any(
             d.manifest.get("mode") != "sequence" or len(d.manifest["images"]) < 2
