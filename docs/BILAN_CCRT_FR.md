@@ -92,9 +92,7 @@ Sauvegarder avant de fermer le navigateur. Pour une archive en plusieurs parties
 
 Par défaut, l’image 1 est le temps zéro. Pour une séquence brute incluant l’installation des animaux, choisir l’image à partir de laquelle l’analyse commence : les indices et le temps précédents restent comptés. Pour une séquence déjà coupée, renseigner le délai connu entre la fin du froid et la première image reçue. Si ce délai est inconnu, rapporter les identifiants d’image plutôt qu’un CCRT absolu trompeur.
 
-Avec l’ingénieur, privilégier une caméra stable, une lumière homogène, les puits entièrement visibles et des bords nets. Vérifier que le contour conserve les pattes des individus proches du bord. La détection automatique est une proposition corrigible ; un puits absent ou masqué n’est pas silencieusement une absence d’individu. L’hypothèse actuelle est un individu par puits ; les cas multiples/masqués sont signalés et exclus des cibles comportementales usuelles.
-
-## Prochaines décisions avec l’équipe
+## Prochaines décisions
 
 - Définir la tolérance acceptable sur le CCRT : ±X images/secondes, risque acceptable d’un réveil trop précoce et traitement des animaux déjà réveillés au début.
 - Annoter l’anatomie d’individus CCRT représentatifs, puis vérifier les superpositions et les erreurs sur d’autres individus.
