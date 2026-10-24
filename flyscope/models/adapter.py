@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import sys
+import time
 
 WORKERS = OrderedDict()
 WORKER_LOCK = threading.RLock()
@@ -34,6 +35,7 @@ class SuiteAdapter:
             "requires_sequence": meta["requires_sequence"],
             "description": "Trained CCRT model; confidence/streak recovery decisions retain raw predictions.",
             "preprocessing": meta["preprocessing"],
+            "image_size": meta["image_size"],
             "class_support": meta["class_support"],
             "recovery_policy": meta["recovery_policy"],
         }
@@ -59,6 +61,7 @@ class SuiteAdapter:
                 "Install requirements.txt before selecting this trained model."
             )
         with self.lock:
+            started = time.perf_counter()
             if self.process is None or self.process.poll() is not None:
                 self.close()
                 with WORKER_LOCK:
@@ -78,7 +81,7 @@ class SuiteAdapter:
                         "--model",
                         str(self.path),
                         "--device",
-                        os.environ.get("FLYSCOPE_INFERENCE_DEVICE", "cpu"),
+                        os.environ.get("FLYSCOPE_INFERENCE_DEVICE", "auto"),
                     ]
                     self.process = subprocess.Popen(
                         command,
@@ -116,6 +119,10 @@ class SuiteAdapter:
                 value = json.loads(reply)
                 if value.get("error"):
                     raise RuntimeError(value["error"])
+                self.last_timing = {
+                    **value.get("timing", {}),
+                    "worker_roundtrip_s": time.perf_counter() - started,
+                }
                 return value["records"]
 
 

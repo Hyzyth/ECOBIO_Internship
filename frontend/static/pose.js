@@ -55,20 +55,58 @@ function draw() {
   ctx.clearRect(0, 0, c.width, c.height);
   if (!poseImage) return;
   ctx.drawImage(poseImage, 0, 0, c.width, c.height);
+  const scale = c.width / (c.getBoundingClientRect().width || c.width);
+  const edges = poseProject.edges || [
+    ["head", "thorax"],
+    ["thorax", "abdomen"],
+    ...[
+      "wingL",
+      "wingR",
+      "forelegL4",
+      "forelegR4",
+      "midlegL4",
+      "midlegR4",
+      "hindlegL4",
+      "hindlegR4",
+    ].map((n) => ["thorax", n]),
+  ];
+  if ($("poseLines").checked) {
+    ctx.strokeStyle = "#39c8ff";
+    ctx.lineWidth = scale;
+    for (const [a, b] of edges) {
+      const p = current().points[poseProject.nodes.indexOf(a)],
+        q = current().points[poseProject.nodes.indexOf(b)];
+      if (p?.status !== "visible" || q?.status !== "visible") continue;
+      ctx.beginPath();
+      ctx.moveTo(p.x * (c.width - 1), p.y * (c.height - 1));
+      ctx.lineTo(q.x * (c.width - 1), q.y * (c.height - 1));
+      ctx.stroke();
+    }
+  }
   current().points.forEach((p, i) => {
     if (p.status !== "visible") return;
     ctx.beginPath();
     ctx.fillStyle = i === poseNode ? "#ffd34d" : "#00ec57";
-    ctx.arc(p.x * (c.width - 1), p.y * (c.height - 1), 5, 0, Math.PI * 2);
+    ctx.arc(
+      p.x * (c.width - 1),
+      p.y * (c.height - 1),
+      Number($("poseDotSize").value) * scale,
+      0,
+      Math.PI * 2,
+    );
     ctx.fill();
     ctx.fillStyle = "#07121c";
-    ctx.fillText(
-      String(i + 1),
-      p.x * (c.width - 1) + 7,
-      p.y * (c.height - 1) - 5,
-    );
+    if ($("poseNumbers").checked)
+      ctx.fillText(
+        String(i + 1),
+        p.x * (c.width - 1) + 7,
+        p.y * (c.height - 1) - 5,
+      );
   });
 }
+for (const id of ["poseDotSize", "poseLines", "poseNumbers"])
+  $(id).oninput = draw;
+window.addEventListener("resize", draw);
 function controls() {
   const e = current();
   $("poseNodes").replaceChildren(

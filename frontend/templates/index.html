@@ -156,6 +156,8 @@
             </details>
             <p class="hint" data-sequence>Recovery settings are selected on held-out validation individuals during training. If no reliable settings are found, automatic recovery stays Unsure. Confirmed Awake remains Awake to the end; raw outputs and manual annotations remain separate.</p>
             <button id="analyze">Analyze sequence</button>
+            <label data-sequence><input id="stopAfterAwake" type="checkbox" checked /> Stop model inference for each well after confirmed Awake</label>
+            <p class="hint" data-sequence>Later frames carry the recovery decision with no new model confidence. Changing recovery settings requires a new analysis to obtain skipped raw outputs.</p>
           </details>
           <button id="reviewContinue" class="workflow-next" data-next-step>Continue to export →</button>
         </section>
@@ -301,6 +303,15 @@
           <button data-workflow-stages="review" id="confirmSingles" class="secondary" data-ccrt>Confirm unchecked wells contain one individual</button>
           <p id="wellProgress" class="hint" data-sequence></p><div class="quick-labels" data-sequence><button data-workflow-stages="wells" id="nextBoundary" class="secondary">Next unreviewed boundary</button><button data-workflow-stages="review" id="nextLabel" class="secondary">Next unlabeled frame</button></div>
           <div id="prediction" data-workflow-stages="review">No well selected.</div>
+          <details data-ccrt data-workflow-stages="review">
+            <summary>Inspect the selected well’s model input</summary>
+            <label>Preview<select id="inputPreviewMode"><option value="model">Current model input</option><option value="fly">Fly isolation for new training</option></select></label>
+            <button id="inputPreview" class="secondary">Show crop preview</button>
+            <p id="inputPreviewInfo" class="hint"></p>
+            <img id="inputPreviewOriginal" alt="Masked well crop" hidden style="width:45%;image-rendering:pixelated" />
+            <img id="inputPreviewImage" alt="Model input crop" hidden style="width:45%;image-rendering:pixelated" />
+            <p class="hint">Left: masked well. Right: model input. Check thin legs and flies near the rim. Contrast isolation can retain nearby dust or miss faint limbs; ambiguous crops keep the well. Previewing leaves your source images unchanged.</p>
+          </details>
           <details id="predictionDetails" data-workflow-stages="review" hidden>
             <summary>Model prediction details</summary>
             <p id="predictionInfo" class="hint"></p>

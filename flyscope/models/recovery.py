@@ -7,6 +7,52 @@ Missing fields retain legacy behavior for immutable older checkpoints.
 import math
 
 
+class RecoveryTracker:
+    """Constant-memory confirmation gate for optional inference stopping.
+
+    Offline apply_policy still determines onset/backfills. This gate uses only
+    the same past raw evidence and never model decisions or manual test truth.
+    """
+
+    def __init__(self, policy):
+        self.policy = policy
+        self.streak = 0
+        self.observed_coma = False
+        self.previous = None
+        self.confirmed = None
+
+    def observe(self, record, frame):
+        if self.confirmed is not None:
+            return
+        if self.previous is not None and frame != self.previous + 1:
+            self.streak = 0
+        self.previous = frame
+        raw = record.get("raw_prediction", record["prediction"])
+        confidence = record.get("raw_confidence", record["confidence"])
+        if (
+            record.get("decision_eligible") is False
+            or record.get("boundary_partial")
+            or confidence is None
+            or confidence < self.policy["confidence_threshold"]
+        ):
+            self.streak = 0
+        elif raw == "coma":
+            self.observed_coma, self.streak = True, 0
+        elif (
+            raw == "awake"
+            and self.policy.get("automatic_confirmation", True)
+            and (
+                self.observed_coma
+                or not self.policy.get("require_coma_before_awake", False)
+            )
+        ):
+            self.streak += 1
+            if self.streak >= self.policy["awake_consecutive_frames"]:
+                self.confirmed = frame
+        else:
+            self.streak = 0
+
+
 def effective_policy(policy, interval=None):
     result = dict(policy)
     seconds = result.get("awake_confirmation_seconds")

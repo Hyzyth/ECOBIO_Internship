@@ -475,6 +475,9 @@ function updateDetails() {
   $("predictionInfo").textContent = r.model
     ? `${r.model.name} · Version: ${r.model.version} · Model state: ${(r.prediction || "unknown").toUpperCase()} · Confidence: ${r.confidence == null ? "Not available" : Math.round(r.confidence * 100) + "%"}${r.raw_prediction ? " · Raw state: " + r.raw_prediction.toUpperCase() + " · Raw confidence: " + (r.raw_confidence == null ? "Not available" : Math.round(r.raw_confidence * 100) + "%") : ""}${r.recovery_decision?.confirmed_frame_index != null ? " · Recovery starts at frame " + (r.recovery_decision.onset_frame_index + 1) + ", confirmed at frame " + (r.recovery_decision.confirmed_frame_index + 1) : ""}${r.temporal_inference ? " · Inferred between frames " + (r.temporal_inference.left_frame_index + 1) + " and " + (r.temporal_inference.right_frame_index + 1) + "; not a direct confident prediction" : ""}${r.occupancy_method ? " · Occupancy: " + r.occupancy_prediction + " (" + r.occupancy_method + ")" : ""}`
     : "";
+  if (r.inference_skipped)
+    $("predictionInfo").textContent +=
+      " · Inference skipped after confirmed Awake; no raw model output for this frame.";
   renderSummary();
   updateContext();
 }
@@ -753,6 +756,9 @@ function setBusy(value) {
     "requireComaBaseline",
     "useModelPolicy",
     "inferMatchingGaps",
+    "stopAfterAwake",
+    "inputPreview",
+    "inputPreviewMode",
   ].forEach((id) => ($(id).disabled = value));
   $("cancel").hidden = !value;
   $("progress").hidden = !value;
@@ -1345,31 +1351,51 @@ $("analyze").onclick = async () => {
   $("progress").max = files.length;
   $("progress").value = 0;
   const sequenceSession = crypto.randomUUID();
+  let workerSession = sequenceSession,
+    lastInferredFrame = null;
+  project.inference_profile = [];
   try {
     for (const i of C.analysisIndices(project)) {
       if (cancelled) break;
+      const pending = C.prepareInference(
+        project,
+        i,
+        sequenceSession,
+        $("stopAfterAwake").checked,
+      );
+      if (!pending.length) {
+        $("progress").value = i + 1;
+        continue;
+      }
       const form = new FormData();
       form.append("image", files[i]);
       form.append("model", $("model").value);
       if (project.mode === "sequence") {
-        form.append("sequence_session", sequenceSession);
+        if (lastInferredFrame !== null && i !== lastInferredFrame + 1)
+          workerSession = crypto.randomUUID();
+        form.append("sequence_session", workerSession);
         form.append("frame_index", String(i));
       }
       form.append(
         "wells",
         JSON.stringify(
-          project.wells
-            .filter((w) => C.activeWell(w, i))
-            .map((w) => ({
-              id: w.uid,
-              points: C.geometry(w, i),
-              occupancy: w.occupancy,
-              partial: w.partial_frames?.[i] ?? !!w.detection.partial,
-            })),
+          pending.map((w) => ({
+            id: w.uid,
+            points: C.geometry(w, i),
+            occupancy: w.occupancy,
+            partial: w.partial_frames?.[i] ?? !!w.detection.partial,
+          })),
         ),
       );
-      if (!project.wells.some((w) => C.activeWell(w, i))) continue;
+      const requestStarted = performance.now();
       const data = await post("/api/analyze", form);
+      lastInferredFrame = i;
+      project.inference_profile.push({
+        frame_index: i,
+        wells: pending.length,
+        browser_roundtrip_s: (performance.now() - requestStarted) / 1000,
+        ...data.timing,
+      });
       if (cancelled) break;
       data.records.forEach((r) => {
         const k = C.key(i, r.well_id);
@@ -1392,6 +1418,7 @@ $("analyze").onclick = async () => {
           confidence: r.confidence,
           decision_eligible: r.decision_eligible,
           abstention_reason: r.abstention_reason,
+          inference_skipped: null,
           model: data.model,
           egg_count: r.egg_count ?? null,
         };
@@ -1414,6 +1441,30 @@ $("analyze").onclick = async () => {
 $("cancel").onclick = () => {
   cancelled = true;
   status("Cancelling after the current request…");
+};
+$("inputPreview").onclick = async () => {
+  try {
+    if (!selected || !files[index])
+      return status("Select an image and a well first.");
+    const form = new FormData();
+    form.append("image", files[index]);
+    form.append(
+      "wells",
+      JSON.stringify([
+        { id: selected, points: C.geometry(selectedWell(), index) },
+      ]),
+    );
+    form.append("model", $("model").value);
+    form.append("mode", $("inputPreviewMode").value);
+    const result = await post("/api/input-preview", form);
+    $("inputPreviewOriginal").src = result.original;
+    $("inputPreviewImage").src = result.image;
+    $("inputPreviewOriginal").hidden = $("inputPreviewImage").hidden = false;
+    $("inputPreviewInfo").textContent =
+      `${result.size} × ${result.size} · ${result.foreground_status.replaceAll("_", " ")}`;
+  } catch (e) {
+    status(e.message);
+  }
 };
 function download(name, text, type) {
   const url = URL.createObjectURL(new Blob([text], { type })),

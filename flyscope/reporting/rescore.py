@@ -11,7 +11,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--results", required=True)
     p.add_argument("--output", required=True)
-    p.add_argument("--tolerances", type=int, nargs="+", default=[1, 5, 10, 30, 60])
+    p.add_argument("--tolerances", type=int, nargs="+", default=[1, 5, 7, 8, 10, 30, 60])
     args = p.parse_args()
     if any(t < 0 for t in args.tolerances):
         p.error("Tolerances must be nonnegative integer frame counts.")

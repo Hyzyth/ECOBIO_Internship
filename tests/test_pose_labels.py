@@ -10,6 +10,33 @@ from flyscope.training.pose_quality import split_examples
 
 
 class PoseLabels(unittest.TestCase):
+    def test_articulated_project_adds_unlabeled_joints_and_named_edges(self):
+        from flyscope.data.pose_labels import NODES, JOINTS
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            train, _ = grids(root / "fixture")
+            original = (train / "annotations.json").read_bytes()
+            m = prepare(
+                train,
+                root / "labels",
+                count=4,
+                size=64,
+                articulated=True,
+                foreground="fly",
+            )
+            self.assertEqual(m["nodes"], NODES + JOINTS)
+            self.assertIn(["thorax", "forelegLFemurTibia"], m["edges"])
+            self.assertIn(["forelegLFemurTibia", "forelegL4"], m["edges"])
+            self.assertTrue(
+                all(
+                    p["status"] == "unlabeled"
+                    for e in m["examples"]
+                    for p in e["points"]
+                )
+            )
+            self.assertEqual((train / "annotations.json").read_bytes(), original)
+
     def test_partial_labels_and_whole_individual_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

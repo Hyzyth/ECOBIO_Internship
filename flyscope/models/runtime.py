@@ -10,14 +10,16 @@ import hashlib
 import itertools
 import json
 import os
+import time
 from pathlib import Path
 import numpy as np
 import cv2
 from flyscope.models.keras import crop_well, occupancy_features
+from flyscope.imaging.foreground import MASKED, ISOLATED, PREPROCESSINGS, isolate
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 CLASSES = ["coma", "awake", "empty"]
-PREPROCESSING = "masked-rgb-square-white-0-1-v1"
+PREPROCESSING = MASKED
 POSE_PREPROCESSING = "foreground-centered-square-rgb-v1"
 
 
@@ -29,9 +31,13 @@ def digest(path):
     return h.hexdigest()
 
 
-def crop_rgb(image, points, size=128):
+def crop_rgb(image, points, size=128, preprocessing=PREPROCESSING):
+    if preprocessing not in PREPROCESSINGS:
+        raise ValueError("Unsupported crop preprocessing.")
     crop, mask = crop_well(image, points)
     features, _ = occupancy_features(crop, mask)
+    if preprocessing == ISOLATED:
+        crop, _ = isolate(crop, mask)
     crop[mask == 0] = 255
     side = max(crop.shape[:2])
     square = np.full((side, side, 3), 255, np.uint8)
@@ -91,7 +97,7 @@ def make_resnet(initialization="imagenet"):
     return net
 
 
-def make_deepethogram(window=5, initialization="imagenet"):
+def make_deepethogram(window=5, initialization="imagenet", feature_mode="two-stream"):
     import torch
     from torchvision.models import resnet18
     from flyscope.models.upstream import architectures
@@ -109,6 +115,7 @@ def make_deepethogram(window=5, initialization="imagenet"):
     class Network(torch.nn.Module):
         def __init__(self):
             super().__init__()
+            self.feature_dimension = 512 if feature_mode == "appearance" else 1024
             self.motion = TinyMotionNet(num_images=window)
 
             def initialized_cnn(channels):
@@ -137,8 +144,10 @@ def make_deepethogram(window=5, initialization="imagenet"):
             spatial = initialized_cnn(3)
             flow = initialized_cnn((window - 1) * 2)
             self.spatial, self.flow, self.fusion = spatial, flow, Fusion()
+            if feature_mode == "appearance":
+                self.appearance_head = torch.nn.Linear(512, 3)
             self.temporal = TGM(
-                D=1024,
+                D=self.feature_dimension,
                 classes=3,
                 filter_length=window,
                 n_filters=3,
@@ -150,6 +159,9 @@ def make_deepethogram(window=5, initialization="imagenet"):
 
         def features(self, clips):
             b, t, c, h, w = clips.shape
+            if feature_mode == "appearance":
+                rgb = self.spatial(normalize(clips[:, -1]))
+                return rgb, self.appearance_head(rgb)
             with torch.no_grad():
                 flows = self.motion(clips.reshape(b, t * c, h, w))[0]
             rgb = self.spatial(normalize(clips[:, -1]))
@@ -274,6 +286,11 @@ def model_version(meta):
     ]
     if "pose_quality_policy" in meta:
         keys.append("pose_quality_policy")
+    if "training_sampling" in meta:
+        keys.append("training_sampling")
+    for key in ("deepethogram_variant", "appearance_parent_version"):
+        if key in meta:
+            keys.append(key)
     return hashlib.sha256(
         json.dumps({k: meta.get(k) for k in keys}, sort_keys=True).encode()
     ).hexdigest()
@@ -336,21 +353,38 @@ def forest_export(forest):
 
 
 def forest_probabilities(forest, features):
-    predictions = []
-    for feature in features:
-        p = np.zeros(3)
-        for tree in forest["trees"]:
-            node = 0
-            while tree["left"][node] >= 0:
-                node = (
-                    tree["left"][node]
-                    if feature[tree["feature"][node]] <= tree["threshold"][node]
-                    else tree["right"][node]
-                )
-            values = np.asarray(tree["values"][node], float)
-            p[forest["classes"]] += values / values.sum()
-        predictions.append(p / len(forest["trees"]))
-    return np.stack(predictions)
+    x = np.asarray(features)
+    result = np.zeros((len(x), 3))
+    # Traverse all samples together, avoiding the Python sample × tree loop.
+    for tree in forest["trees"]:
+        left, right = np.asarray(tree["left"]), np.asarray(tree["right"])
+        columns, thresholds = np.asarray(tree["feature"]), np.asarray(tree["threshold"])
+        nodes = np.zeros(len(x), dtype=int)
+        active = np.flatnonzero(left[nodes] >= 0)
+        while len(active):
+            current = nodes[active]
+            nodes[active] = np.where(
+                x[active, columns[current]] <= thresholds[current],
+                left[current],
+                right[current],
+            )
+            active = active[left[nodes[active]] >= 0]
+        values = np.asarray(tree["values"])[nodes]
+        result[:, forest["classes"]] += values / values.sum(axis=1, keepdims=True)
+    return result / len(forest["trees"])
+
+
+def compile_forest(forest):
+    """Convert portable lists once per worker, rather than once per frame."""
+    if forest is None:
+        return None
+    return {
+        "classes": forest["classes"],
+        "trees": [
+            {key: np.asarray(value) for key, value in tree.items()}
+            for tree in forest["trees"]
+        ],
+    }
 
 
 class SuiteModel:
@@ -360,7 +394,7 @@ class SuiteModel:
         self.meta = json.loads(self.path.read_text())
         if (
             self.meta.get("classes") != CLASSES
-            or self.meta.get("preprocessing") != PREPROCESSING
+            or self.meta.get("preprocessing") not in PREPROCESSINGS
             or self.meta.get("version") != model_version(self.meta)
         ):
             raise ValueError(
@@ -375,7 +409,23 @@ class SuiteModel:
         self.sessions = OrderedDict()
         self.pose = None
         if self.kind == "sleap-rf":
-            self.forest = json.loads((self.root / "forest.json").read_text())
+            pose_preprocessing = json.loads(
+                (self.root / "pose/pose.json").read_text()
+            ).get("source_crop_preprocessing")
+            if (
+                pose_preprocessing is not None
+                and pose_preprocessing != self.meta["preprocessing"]
+            ):
+                raise ValueError(
+                    "Pose parent and behavior checkpoint use different crop preprocessing."
+                )
+            self.forest = {
+                name: compile_forest(value)
+                for name, value in json.loads(
+                    (self.root / "forest.json").read_text()
+                ).items()
+                if name in ("occupancy", "state")
+            }
             self.pose = PoseWorker(self.root / "pose", device=device)
         else:
             import torch
@@ -384,7 +434,15 @@ class SuiteModel:
             self.network = (
                 make_resnet("scratch")
                 if self.kind == "resnet18"
-                else make_deepethogram(self.meta["window"], "scratch")
+                else make_deepethogram(
+                    self.meta["window"],
+                    "scratch",
+                    (
+                        "appearance"
+                        if self.meta.get("deepethogram_variant") == "resnet-temporal"
+                        else "two-stream"
+                    ),
+                )
             )
             self.network.load_state_dict(
                 torch.load(
@@ -395,16 +453,23 @@ class SuiteModel:
             self.network.to(self.device).eval()
 
     def predict(self, content, wells, session=None, frame=None):
+        if not wells:
+            return []
+        started = time.perf_counter()
         image = cv2.imdecode(np.frombuffer(content, np.uint8), cv2.IMREAD_COLOR)
         if image is None:
             raise ValueError("Unreadable model image.")
+        decoded = time.perf_counter()
         images = []
         foreground = []
         unreliable_pose = [False] * len(wells)
         for well in wells:
-            im, feature = crop_rgb(image, well["points"], self.size)
+            im, feature = crop_rgb(
+                image, well["points"], self.size, self.meta["preprocessing"]
+            )
             images.append(im)
             foreground.append(feature)
+        cropped = time.perf_counter()
         if self.kind == "sleap-rf":
             poses = self.pose.predict(
                 [pose_input(im) for im in images], [w["id"] for w in wells]
@@ -470,7 +535,7 @@ class SuiteModel:
                 len(wells), window, 3, self.size, self.size
             )
             with torch.inference_mode():
-                current, _ = self.network.features(x)
+                current, fusion_logits = self.network.features(x)
                 for w, v in zip(wells, current):
                     past = state["wells"][w["id"]]["features"]
                     past.append(v.detach())
@@ -480,16 +545,23 @@ class SuiteModel:
                             [history[0]] * (window - len(history)) + history, dim=1
                         )
                     )
-                probabilities = (
-                    self.network.temporal(torch.stack(features))[:, :, -1]
-                    .softmax(1)
-                    .cpu()
-                    .numpy()
+                logits = (
+                    fusion_logits
+                    if self.meta.get("deepethogram_variant") == "two-stream"
+                    else self.network.temporal(torch.stack(features))[:, :, -1]
                 )
+                probabilities = logits.softmax(1).cpu().numpy()
             state["last_frame"] = frame
             self.sessions[session] = state
             while len(self.sessions) > 4:
                 self.sessions.popitem(last=False)
+        inferred = time.perf_counter()
+        self.last_timing = {
+            "decode_s": decoded - started,
+            "crop_s": cropped - decoded,
+            "model_s": inferred - cropped,
+            "well_count": len(wells),
+        }
         records = []
         for well, p, bad_pose in zip(wells, probabilities, unreliable_pose):
             if (

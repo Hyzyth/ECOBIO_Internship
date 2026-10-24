@@ -30,6 +30,7 @@ from flyscope.models.runtime import (
     model_version,
     POSE_QUALITY_POLICY,
     usable_pose,
+    SuiteModel,
 )
 from flyscope.training.policy_selection import select_policy
 from flyscope.training.support import prefetched, host_tensor, device_tensor
@@ -96,6 +97,14 @@ def train_model(kind, data, run, out, args):
         false_awake_cost=args.false_awake_cost,
     )
     pose_source = None
+    stage_metrics = {}
+    stage_probabilities = {}
+    appearance_parent_version = None
+    variant = (
+        getattr(args, "deepethogram_variant", "full")
+        if kind == "deepethogram"
+        else None
+    )
     if kind == "sleap-rf":
         if not args.pose_model:
             raise ValueError(
@@ -104,6 +113,13 @@ def train_model(kind, data, run, out, args):
         from sklearn.ensemble import RandomForestClassifier
 
         pose_source = Path(args.pose_model).resolve()
+        pose_preprocessing = json.loads((pose_source / "pose.json").read_text()).get(
+            "source_crop_preprocessing"
+        )
+        if pose_preprocessing is not None and pose_preprocessing != data.preprocessing:
+            raise ValueError(
+                "The CCRT pose parent was trained with different crop preprocessing. Fine-tune anatomy on matching pose inputs before fitting the forests."
+            )
         worker = PoseWorker(pose_source, device=args.device)
         features = []
         pose_eligible = []
@@ -253,8 +269,41 @@ def train_model(kind, data, run, out, args):
         network = (
             make_resnet(args.initialization)
             if kind == "resnet18"
-            else make_deepethogram(args.window, args.initialization)
+            else make_deepethogram(
+                args.window,
+                "scratch" if variant == "resnet-temporal" else args.initialization,
+                "appearance" if variant == "resnet-temporal" else "two-stream",
+            )
         )
+        if variant == "resnet-temporal":
+            parent = SuiteModel(args.appearance_model, args.device)
+            try:
+                if (
+                    parent.kind != "resnet18"
+                    or parent.size != args.image_size
+                    or parent.meta["preprocessing"] != data.preprocessing
+                    or set(parent.meta["selection"]["annotation_ids"]) != set(ids)
+                    or set(parent.meta["training_dataset_sha256"])
+                    != {d.sha for d in data.datasets}
+                    or (parent.meta.get("validation") or {}).get("well_uids")
+                    != (validation or {}).get("well_uids")
+                ):
+                    raise ValueError(
+                        "Appearance parent must be a ResNet with the same pixels, fitting annotation IDs, datasets and held-out validation wells."
+                    )
+                network.spatial[0].load_state_dict(
+                    {
+                        k: v
+                        for k, v in parent.network.state_dict().items()
+                        if not k.startswith("fc.")
+                    }
+                )
+                network.appearance_head.load_state_dict(parent.network.fc.state_dict())
+                appearance_parent_version = parent.meta["version"]
+            finally:
+                parent.close()
+            for name, parameter in network.named_parameters():
+                parameter.requires_grad = name.startswith("temporal.")
         if args.backbone == "frozen":
             if kind == "resnet18":
                 for name, parameter in network.named_parameters():
@@ -512,30 +561,60 @@ def train_model(kind, data, run, out, args):
                     len(batch), args.window, 3, args.image_size, args.image_size
                 )
 
-            optimize(
-                "optical_flow",
-                network.motion.parameters(),
-                args.flow_epochs,
-                lambda batch, inputs: flow_loss(network, clips(batch, inputs)),
-                prepare_clips,
-            )
+            if variant != "resnet-temporal":
+                optimize(
+                    "optical_flow",
+                    network.motion.parameters(),
+                    args.flow_epochs,
+                    lambda batch, inputs: flow_loss(network, clips(batch, inputs)),
+                    prepare_clips,
+                )
             network.motion.eval()
             for p in network.motion.parameters():
                 p.requires_grad = False
-            optimize(
-                "two_stream",
-                [
-                    p
-                    for n, p in network.named_parameters()
-                    if p.requires_grad and not n.startswith(("motion.", "temporal."))
-                ],
-                args.epochs,
-                lambda batch, inputs: classification_loss(
-                    network.features(clips(batch, inputs))[1], batch
-                ),
-                prepare_clips,
-                predict=lambda batch, inputs: network.features(clips(batch, inputs))[1],
-            )
+            if variant != "resnet-temporal":
+                validation_probabilities = optimize(
+                    "two_stream",
+                    [
+                        p
+                        for n, p in network.named_parameters()
+                        if p.requires_grad
+                        and not n.startswith(("motion.", "temporal."))
+                    ],
+                    args.epochs,
+                    lambda batch, inputs: classification_loss(
+                        network.features(clips(batch, inputs))[1], batch
+                    ),
+                    prepare_clips,
+                    predict=lambda batch, inputs: network.features(
+                        clips(batch, inputs)
+                    )[1],
+                )
+                if validation_probabilities is not None:
+                    stage_probabilities["two-stream"] = validation_probabilities
+                    stage_metrics["two_stream"] = validation_metrics(
+                        validation_probabilities,
+                        [target(data, k) for k in validation_ids],
+                        [val_weights[k] for k in validation_ids],
+                    )
+            else:
+                network.eval()
+                with torch.inference_mode():
+                    values = []
+                    for offset in range(0, len(validation_ids), batch_size):
+                        batch = validation_ids[offset : offset + batch_size]
+                        values.extend(
+                            network.features(clips(batch, prepare_clips(batch)))[1]
+                            .softmax(1)
+                            .cpu()
+                            .numpy()
+                        )
+                if values:
+                    stage_metrics["matched_resnet"] = validation_metrics(
+                        np.asarray(values),
+                        [target(data, k) for k in validation_ids],
+                        [val_weights[k] for k in validation_ids],
+                    )
             network.eval()
 
             def history_keys(identity):
@@ -552,111 +631,144 @@ def train_model(kind, data, run, out, args):
                     for i in range(args.window)
                 ]
 
-            keys = sorted(
-                {key for k in ids + validation_ids for key in history_keys(k)}
-            )
-            indices = {key: i for i, key in enumerate(keys)}
-            starts = {
-                d.sha: d.manifest.get(
-                    "analysis_start_index", min(data.image_maps[d.sha])
+            if variant != "two-stream":
+                keys = sorted(
+                    {key for k in ids + validation_ids for key in history_keys(k)}
                 )
-                for d in data.datasets
-            }
-
-            def prepare_features(batch):
-                return host_tensor(
-                    [
-                        data.rgb(
-                            sha,
-                            max(starts[sha], frame - args.window + 1 + i),
-                            well,
-                            args.image_size,
-                        )[0]
-                        for sha, frame, well in batch
-                        for i in range(args.window)
-                    ],
-                    device.type == "cuda",
-                )
-
-            # Feature extraction was one GPU call per frame/well, with every
-            # feature retained on the GPU. Batch it and keep the fixed features
-            # on disk instead; TGM training now has bounded device memory.
-            progress.emit(
-                "phase_start",
-                force=True,
-                **context,
-                phase="temporal_features",
-                samples=len(keys),
-                batch_size=batch_size,
-            )
-            with tempfile.TemporaryDirectory(
-                prefix="temporal-features-", dir=args.output
-            ) as temporary:
-                if (
-                    shutil.disk_usage(temporary).free
-                    < len(keys) * 1024 * 4 + 16 * 1024**2
-                ):
-                    raise ValueError(
-                        "Not enough free space in --output for temporary temporal features."
+                indices = {key: i for i, key in enumerate(keys)}
+                starts = {
+                    d.sha: d.manifest.get(
+                        "analysis_start_index", min(data.image_maps[d.sha])
                     )
-                features = np.lib.format.open_memmap(
-                    Path(temporary) / "features.npy",
-                    mode="w+",
-                    dtype=np.float32,
-                    shape=(len(keys), 1024),
-                )
-                try:
-                    batches = (
-                        keys[offset : offset + batch_size]
-                        for offset in range(0, len(keys), batch_size)
-                    )
-                    completed = 0
-                    with torch.no_grad():
-                        for batch, inputs in prefetched(
-                            batches, prepare_features, args.prefetch_batches
-                        ):
-                            values = (
-                                network.features(clips(batch, inputs))[0].cpu().numpy()
-                            )
-                            features[completed : completed + len(batch)] = values
-                            completed += len(batch)
-                            progress.emit(
-                                "temporal_features",
-                                **context,
-                                phase="temporal_features",
-                                samples=completed,
-                                total_samples=len(keys),
-                            )
-                    features.flush()
+                    for d in data.datasets
+                }
 
-                    def prepare_temporal(batch):
-                        rows = [indices[key] for k in batch for key in history_keys(k)]
-                        value = torch.from_numpy(
-                            features[rows]
-                            .reshape(len(batch), args.window, 1024)
-                            .transpose(0, 2, 1)
-                            .copy()
+                def prepare_features(batch):
+                    return host_tensor(
+                        [
+                            data.rgb(
+                                sha,
+                                max(starts[sha], frame - args.window + 1 + i),
+                                well,
+                                args.image_size,
+                            )[0]
+                            for sha, frame, well in batch
+                            for i in range(args.window)
+                        ],
+                        device.type == "cuda",
+                    )
+
+                # Feature extraction was one GPU call per frame/well, with every
+                # feature retained on the GPU. Batch it and keep the fixed features
+                # on disk instead; TGM training now has bounded device memory.
+                progress.emit(
+                    "phase_start",
+                    force=True,
+                    **context,
+                    phase="temporal_features",
+                    samples=len(keys),
+                    batch_size=batch_size,
+                )
+                feature_dimension = network.feature_dimension
+                with tempfile.TemporaryDirectory(
+                    prefix="temporal-features-", dir=args.output
+                ) as temporary:
+                    if (
+                        shutil.disk_usage(temporary).free
+                        < len(keys) * feature_dimension * 4 + 16 * 1024**2
+                    ):
+                        raise ValueError(
+                            "Not enough free space in --output for temporary temporal features."
                         )
-                        return value.pin_memory() if device.type == "cuda" else value
+                    features = np.lib.format.open_memmap(
+                        Path(temporary) / "features.npy",
+                        mode="w+",
+                        dtype=np.float32,
+                        shape=(len(keys), feature_dimension),
+                    )
+                    try:
+                        batches = (
+                            keys[offset : offset + batch_size]
+                            for offset in range(0, len(keys), batch_size)
+                        )
+                        completed = 0
+                        with torch.no_grad():
+                            for batch, inputs in prefetched(
+                                batches, prepare_features, args.prefetch_batches
+                            ):
+                                values = (
+                                    network.features(clips(batch, inputs))[0]
+                                    .cpu()
+                                    .numpy()
+                                )
+                                features[completed : completed + len(batch)] = values
+                                completed += len(batch)
+                                progress.emit(
+                                    "temporal_features",
+                                    **context,
+                                    phase="temporal_features",
+                                    samples=completed,
+                                    total_samples=len(keys),
+                                )
+                        features.flush()
 
-                    validation_probabilities = optimize(
-                        "temporal_tgm",
-                        network.temporal.parameters(),
-                        args.sequence_epochs,
-                        lambda batch, inputs: classification_loss(
-                            network.temporal(
+                        def prepare_temporal(batch):
+                            rows = [
+                                indices[key] for k in batch for key in history_keys(k)
+                            ]
+                            value = torch.from_numpy(
+                                features[rows]
+                                .reshape(len(batch), args.window, feature_dimension)
+                                .transpose(0, 2, 1)
+                                .copy()
+                            )
+                            return (
+                                value.pin_memory() if device.type == "cuda" else value
+                            )
+
+                        validation_probabilities = optimize(
+                            "temporal_tgm",
+                            network.temporal.parameters(),
+                            args.sequence_epochs,
+                            lambda batch, inputs: classification_loss(
+                                network.temporal(
+                                    inputs.to(
+                                        device, non_blocking=device.type == "cuda"
+                                    )
+                                )[:, :, -1],
+                                batch,
+                            ),
+                            prepare_temporal,
+                            predict=lambda batch, inputs: network.temporal(
                                 inputs.to(device, non_blocking=device.type == "cuda")
                             )[:, :, -1],
-                            batch,
-                        ),
-                        prepare_temporal,
-                        predict=lambda batch, inputs: network.temporal(
-                            inputs.to(device, non_blocking=device.type == "cuda")
-                        )[:, :, -1],
-                    )
-                finally:
-                    features._mmap.close()
+                        )
+                        if validation_probabilities is not None:
+                            stage_probabilities["full"] = validation_probabilities
+                            stage_metrics["temporal_tgm"] = validation_metrics(
+                                validation_probabilities,
+                                [target(data, k) for k in validation_ids],
+                                [val_weights[k] for k in validation_ids],
+                            )
+                    finally:
+                        features._mmap.close()
+
         payload = network.state_dict()
+    if variant == "auto":
+        variant = min(
+            ("two-stream", "full"),
+            key=lambda stage: stage_metrics[
+                "two_stream" if stage == "two-stream" else "temporal_tgm"
+            ]["balanced_nll"],
+        )
+        validation_probabilities = stage_probabilities[variant]
+        progress.emit(
+            "output_stage_selected",
+            force=True,
+            **context,
+            variant=variant,
+            criterion="lowest held-out balanced NLL; ties prefer simpler two-stream",
+        )
     policy = {
         "confidence_threshold": args.confidence_threshold,
         "awake_consecutive_frames": args.awake_frames,
@@ -702,7 +814,7 @@ def train_model(kind, data, run, out, args):
         "image_size": args.image_size,
         "window": args.window if kind == "deepethogram" else 1,
         "requires_sequence": kind == "deepethogram",
-        "preprocessing": PREPROCESSING,
+        "preprocessing": data.preprocessing,
         "classes": CLASSES,
         "pose_preprocessing": POSE_PREPROCESSING if kind == "sleap-rf" else None,
         "selection": run,
@@ -760,6 +872,31 @@ def train_model(kind, data, run, out, args):
             "test_data_used_for_training": False,
         },
     }
+    sampling = getattr(args, "training_sampling", {}).get(run["id"])
+    if sampling:
+        meta["training_sampling"] = sampling
+    if kind == "deepethogram":
+        meta["deepethogram_variant"] = variant
+        meta["requested_deepethogram_variant"] = getattr(
+            args, "deepethogram_variant", "full"
+        )
+        meta["appearance_parent_version"] = appearance_parent_version
+        meta["name"] = f"deepethogram ({variant}) / {run['id']}"
+        meta["component_validation"] = stage_metrics
+        prior = stage_metrics.get("two_stream", stage_metrics.get("matched_resnet"))
+        final = stage_metrics.get("temporal_tgm")
+        meta["temporal_validation_regressed"] = bool(
+            prior and final and final["balanced_nll"] > prior["balanced_nll"]
+        )
+        if meta["temporal_validation_regressed"]:
+            progress.emit(
+                "temporal_validation_regressed",
+                force=True,
+                **context,
+                prior_balanced_nll=prior["balanced_nll"],
+                temporal_balanced_nll=final["balanced_nll"],
+                selected_output=variant,
+            )
     meta["runtime"] = {
         "python": sys.version.split()[0],
         "numpy": np.__version__,

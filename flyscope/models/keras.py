@@ -154,6 +154,7 @@ class KerasAdapter:
             "task": "ccrt",
             "classes": list(CLASSES),
             "preprocessing": PREPROCESSING,
+            "image_size": 200,
             "empty_method": (
                 "learned-occupancy-v1"
                 if self.sidecar.get("occupancy_head")

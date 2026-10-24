@@ -39,3 +39,5 @@ new experiments, exported datasets, caches, trained weights and results outside 
 
 - [Bilan pratique en français](docs/BILAN_CCRT_FR.md): usage sur PC, partage, ressources et limites actuelles.
 - [Second experiment review](docs/SECOND_TRAINING_REVIEW.md): CCRT timing correction, anatomy transfer and loss interpretation.
+- [Resumed efficiency work](docs/INFERENCE_IMPROVEMENTS.md): inference stopping, fly isolation, target thinning, articulated poses, model inspection and controlled temporal comparisons.
+- [Historical run comparison](docs/TWO_RUN_COMPARISON.md): verified first/second-run results against the clarified individual timing target.

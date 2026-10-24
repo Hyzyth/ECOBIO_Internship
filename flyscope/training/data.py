@@ -2,13 +2,14 @@
 
 from functools import lru_cache
 from flyscope.data.datasets import Dataset
-from flyscope.models.runtime import crop_rgb
+from flyscope.models.runtime import crop_rgb, PREPROCESSING
 
 
 class TrainingData:
     def __init__(self, roots, progress=None):
         self.datasets = [Dataset(root, "train", progress) for root in roots]
         self.cache = None
+        self.preprocessing = PREPROCESSING
         if len({d.sha for d in self.datasets}) != len(self.datasets):
             raise ValueError("Duplicate training datasets.")
         if len({d.manifest["experiment_id"] for d in self.datasets}) != len(
@@ -57,7 +58,7 @@ class TrainingData:
         data = next(d for d in self.datasets if d.sha == sha)
         geometry = self.context_geometry(sha, frame, well)
         im = data.image(self.image_maps[sha][frame]["path"])
-        return crop_rgb(im, geometry["points"], size)
+        return crop_rgb(im, geometry["points"], size, self.preprocessing)
 
     def context_geometry(self, sha, frame, well):
         if frame not in self.image_maps[sha]:

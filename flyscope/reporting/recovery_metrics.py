@@ -3,7 +3,32 @@
 from collections import defaultdict
 import numpy as np
 
-DEFAULT_TOLERANCES = (1, 5, 10, 30, 60)
+DEFAULT_TOLERANCES = (1, 5, 7, 8, 10, 30, 60)
+
+
+def individual_timing_target(errors):
+    """User's event target; missing estimates fail both tolerance counts.
+
+    One item per exact human recovery. MAE is not the acceptance criterion.
+    Never-recovered and interval-censored individuals are reported separately.
+    """
+    total = len(errors)
+    hits = {t: sum(e is not None and abs(e) <= t for e in errors) for t in (5, 7, 8)}
+    within5 = hits[5] * 100 >= 95 * total if total else None
+    within8 = hits[8] == total if total else None
+    return {
+        "definition": "At least 95% of exact human recovery onsets within ±5 original frames and every exact onset within ±8; ±7 is preferred. Missing detections fail. This is an individual-error requirement, not an MAE threshold.",
+        "exact_human_recoveries": total,
+        "required_within_5": (95 * total + 99) // 100 if total else 0,
+        "within_5": hits[5],
+        "within_7": hits[7],
+        "within_8": hits[8],
+        "missing": sum(e is None for e in errors),
+        "at_least_95_percent_within_5": within5,
+        "all_within_8": within8,
+        "all_within_preferred_7": hits[7] == total if total else None,
+        "passed": within5 and within8 if total else None,
+    }
 
 
 def recovery_metrics(rows, manifest, first_recovery, tolerances=DEFAULT_TOLERANCES):
@@ -117,6 +142,11 @@ def recovery_metrics(rows, manifest, first_recovery, tolerances=DEFAULT_TOLERANC
         "event_coverage": detected / len(bounded) if bounded else None,
         "paired_observed_wells": len(errors),
         "mae_frames": float(np.mean(np.abs(errors))) if errors else None,
+        "max_absolute_error_frames": float(np.max(np.abs(errors))) if errors else None,
+        "all_exact_events_detected": len(errors) == len(exact) if exact else None,
+        "individual_timing_target": individual_timing_target(
+            [r["error_frames"] for r in exact]
+        ),
         "median_absolute_error_frames": (
             float(np.median(np.abs(errors))) if errors else None
         ),
