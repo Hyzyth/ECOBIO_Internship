@@ -24,9 +24,39 @@ NODES = [
     "eyeL",
     "eyeR",
 ]
+LEG_PAIRS = [
+    (leg, side) for leg in ("foreleg", "midleg", "hindleg") for side in ("L", "R")
+]
+JOINTS = [f"{leg}{side}FemurTibia" for leg, side in LEG_PAIRS]
 
 
-def prepare(dataset, output, count=48, size=128, skeleton=None, wells=None):
+def skeleton_edges(nodes):
+    edges = [
+        ("head", "thorax"),
+        ("thorax", "abdomen"),
+        ("head", "eyeL"),
+        ("head", "eyeR"),
+        ("thorax", "wingL"),
+        ("thorax", "wingR"),
+    ]
+    for leg, side in LEG_PAIRS:
+        joint, tip = f"{leg}{side}FemurTibia", f"{leg}{side}4"
+        edges.extend(
+            [("thorax", joint), (joint, tip)] if joint in nodes else [("thorax", tip)]
+        )
+    return [list(edge) for edge in edges if all(n in nodes for n in edge)]
+
+
+def prepare(
+    dataset,
+    output,
+    count=48,
+    size=128,
+    skeleton=None,
+    wells=None,
+    articulated=False,
+    foreground="well",
+):
     from flyscope.models.runtime import crop_rgb, pose_input, POSE_PREPROCESSING
 
     data = Dataset(dataset, "train")
@@ -40,6 +70,14 @@ def prepare(dataset, output, count=48, size=128, skeleton=None, wells=None):
         if skeleton
         else NODES
     )
+    nodes = list(nodes)
+    if articulated:
+        nodes.extend(n for n in JOINTS if n not in nodes)
+    from flyscope.imaging.foreground import MASKED, ISOLATED
+
+    if foreground not in ("well", "fly"):
+        raise ValueError("Foreground must be well or fly.")
+    preprocessing = ISOLATED if foreground == "fly" else MASKED
     labels = {
         (a["well_uid"], a["frame_index"]): a["label"]
         for a in data.annotations.values()
@@ -87,7 +125,9 @@ def prepare(dataset, output, count=48, size=128, skeleton=None, wells=None):
     examples = []
     for index, ((state, uid), w, frame) in enumerate(chosen):
         source = images[frame["frame_index"]]
-        rgb, _ = crop_rgb(data.image(source["path"]), frame["points"], size)
+        rgb, _ = crop_rgb(
+            data.image(source["path"]), frame["points"], size, preprocessing
+        )
         rgb = pose_input(rgb)
         relative = f"images/{index+1:05d}.png"
         path = out / relative
@@ -115,6 +155,8 @@ def prepare(dataset, output, count=48, size=128, skeleton=None, wells=None):
         "kind": "flyscope-pose-labels",
         "schema_version": 1,
         "nodes": nodes,
+        "edges": skeleton_edges(nodes),
+        "source_crop_preprocessing": preprocessing,
         "size": size,
         "preprocessing": POSE_PREPROCESSING,
         "examples": examples,
@@ -210,4 +252,12 @@ def load_examples(labels, size):
         raise ValueError(
             "No reviewed examples with at least two visible keypoints. Annotate them in the Pose annotation page first."
         )
-    return nodes, examples, SimpleNamespace(videos=[])
+    return (
+        nodes,
+        examples,
+        SimpleNamespace(
+            videos=[],
+            edges=meta.get("edges", skeleton_edges(nodes)),
+            source_crop_preprocessing=meta.get("source_crop_preprocessing"),
+        ),
+    )

@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 from flyscope.data.datasets import safe_path
 from flyscope.models.runtime import SuiteModel
-from flyscope.models.recovery import apply_policy, effective_policy
+from flyscope.models.recovery import apply_policy, effective_policy, RecoveryTracker
+import time
 
 
-def evaluate_model(path, test, device="auto", progress=None):
+def evaluate_model(path, test, device="auto", progress=None, stop_after_awake=False):
     from flyscope.reporting.metrics import metrics
 
     if progress:
@@ -41,6 +42,13 @@ def evaluate_model(path, test, device="auto", progress=None):
     }
     geometry_by_frame = test.geometry
     output = []
+    policy = effective_policy(meta["recovery_policy"], test.manifest.get("interval"))
+    stopping = stop_after_awake and test.manifest.get("mode") == "sequence"
+    trackers = {w["well_uid"]: RecoveryTracker(policy) for w in test.manifest["wells"]}
+    evaluated_wells, skipped_wells = 0, 0
+    inference_start = time.monotonic()
+    inference_session, last_model_frame = test.sha, None
+    phase_seconds = {"file_read_s": 0.0, "decode_s": 0.0, "crop_s": 0.0, "model_s": 0.0}
     context = {
         "architecture": meta["architecture"],
         "run": meta["selection"]["id"],
@@ -72,12 +80,56 @@ def evaluate_model(path, test, device="auto", progress=None):
                     )
             if not wells:
                 continue
-            records = model.predict(
-                safe_path(test.root, image["path"]).read_bytes(),
-                wells,
-                session=test.sha,
-                frame=frame,
+            pending = [
+                w for w in wells if not stopping or trackers[w["id"]].confirmed is None
+            ]
+            read_started = time.monotonic()
+            content = (
+                safe_path(test.root, image["path"]).read_bytes() if pending else None
             )
+            phase_seconds["file_read_s"] += time.monotonic() - read_started
+            if (
+                pending
+                and last_model_frame is not None
+                and frame != last_model_frame + 1
+            ):
+                inference_session = f"{test.sha}:segment-{frame}"
+            records = (
+                model.predict(
+                    content,
+                    pending,
+                    session=inference_session,
+                    frame=frame,
+                )
+                if pending
+                else []
+            )
+            if pending:
+                last_model_frame = frame
+                for key in ("decode_s", "crop_s", "model_s"):
+                    phase_seconds[key] += getattr(model, "last_timing", {}).get(
+                        key, 0.0
+                    )
+            evaluated_wells += len(records)
+            for r in records:
+                trackers[r["well_id"]].observe(r, frame)
+            pending_ids = {w["id"] for w in pending}
+            for w in wells:
+                if w["id"] not in pending_ids:
+                    skipped_wells += 1
+                    records.append(
+                        {
+                            "well_id": w["id"],
+                            "prediction": "unknown",
+                            "raw_prediction": "unknown",
+                            "confidence": None,
+                            "raw_confidence": None,
+                            "state_probabilities": None,
+                            "decision_eligible": False,
+                            "boundary_partial": w["partial"],
+                            "inference_skipped": "confirmed_awake",
+                        }
+                    )
             if progress:
                 progress.emit(
                     "evaluating",
@@ -132,6 +184,13 @@ def evaluate_model(path, test, device="auto", progress=None):
             },
             "test_experiment": test.manifest["experiment_id"],
             "metrics": metrics(output, test.manifest),
+            "inference": {
+                "stop_after_awake": stopping,
+                "model_well_frames": evaluated_wells,
+                "skipped_well_frames": skipped_wells,
+                "seconds": time.monotonic() - inference_start,
+                "phase_seconds": phase_seconds,
+            },
             "predictions": output,
         }
         return result
@@ -154,11 +213,11 @@ def model_paths(values):
     return list(dict.fromkeys(paths))
 
 
-def finish_evaluation(paths, tests, out, device, progress):
+def finish_evaluation(paths, tests, out, device, progress, stop_after_awake=False):
     results = []
     for path in paths:
         for test in tests:
-            result = evaluate_model(path, test, device, progress)
+            result = evaluate_model(path, test, device, progress, stop_after_awake)
             results.append(result)
             name = f"{result['model']['architecture']}-{result['model']['version'][:12]}-{test.sha[:12]}.json"
             (out / name).write_text(json.dumps(result, indent=2, allow_nan=False))

@@ -5,6 +5,7 @@ Use the app environment installed from requirements.txt. Native
 SLEAP pose pretraining runs with the same Python interpreter with tools/sleap_pose.py. No test grid
 is used for training, threshold selection, early stopping or normalization.
 """
+
 import argparse
 import json
 import os
@@ -27,6 +28,8 @@ from flyscope.training.trainers import train_model
 
 from .data import TrainingData
 from .plans import plan_for, checked_plan
+from flyscope.imaging.foreground import MASKED, ISOLATED
+from .sampling import thin_targets
 from flyscope.evaluation import model_paths, finish_evaluation
 
 
@@ -96,7 +99,52 @@ def main(argv=None):
         help="CPU batches to prepare ahead; 0 disables prefetch",
     )
     compare.add_argument("--image-size", type=int, default=128)
+    compare.add_argument(
+        "--foreground",
+        choices=["well", "fly"],
+        default="well",
+        help="Fly uses versioned contrast isolation; train NEW checkpoints and inspect previews first",
+    )
+    compare.add_argument(
+        "--thin-static",
+        action="store_true",
+        help="Thin repetitive fitting targets per well; preserve validation and temporal context",
+    )
+    compare.add_argument(
+        "--motion-delta",
+        type=int,
+        default=8,
+        help="Minimum grayscale change (1..255) per pixel",
+    )
+    compare.add_argument(
+        "--motion-pixels",
+        type=int,
+        default=3,
+        help="Changed pixels required at --image-size; includes leg-only movement",
+    )
+    compare.add_argument(
+        "--static-keep-every",
+        type=int,
+        default=30,
+        help="Retain spaced static targets at least every N original frames",
+    )
+    compare.add_argument(
+        "--transition-radius",
+        type=int,
+        default=5,
+        help="Keep a dense ±N-frame window around manual state transitions",
+    )
     compare.add_argument("--window", type=int, default=5)
+    compare.add_argument(
+        "--deepethogram-variant",
+        choices=["full", "two-stream", "resnet-temporal", "auto"],
+        default="full",
+        help="Explicit ablations: two-stream omits TGM; resnet-temporal uses a frozen matched ResNet checkpoint with no motion",
+    )
+    compare.add_argument(
+        "--appearance-model",
+        help="Matched ResNet model.json for --deepethogram-variant resnet-temporal (one run at a time)",
+    )
     compare.add_argument("--learning-rate", type=float, default=0.0001)
     compare.add_argument(
         "--initialization", choices=["imagenet", "scratch"], default="imagenet"
@@ -143,6 +191,11 @@ def main(argv=None):
     score = sub.add_parser("evaluate")
     score.add_argument("--models", nargs="+", required=True)
     for parser in [compare, score]:
+        parser.add_argument(
+            "--stop-after-awake",
+            action="store_true",
+            help="Stop inference per confirmed well; report skipped raw outputs separately (default evaluates every raw frame)",
+        )
         parser.add_argument("--test", nargs="+", required=True)
         parser.add_argument("--output", required=True)
         parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
@@ -232,6 +285,10 @@ def main(argv=None):
             or args.weight_decay < 0
             or args.rf_min_samples_leaf < 1
             or args.rf_max_depth < 1
+            or not 1 <= args.motion_delta <= 255
+            or args.motion_pixels < 1
+            or args.static_keep_every < 1
+            or args.transition_radius < 0
             or any(
                 value is not None and value < 1
                 for value in (
@@ -247,6 +304,7 @@ def main(argv=None):
                 "A frozen backbone requires ImageNet initialization; do not freeze random features."
             )
         data = TrainingData(args.train, announce)
+        data.preprocessing = ISOLATED if args.foreground == "fly" else MASKED
         if "deepethogram" in args.architectures and any(
             d.manifest.get("mode") != "sequence" or len(d.manifest["images"]) < 2
             for d in data.datasets
@@ -264,7 +322,17 @@ def main(argv=None):
             raise ValueError("Requested run is not in the shared plan.")
         if not selected:
             raise ValueError("No shared runs selected.")
+        if args.deepethogram_variant == "resnet-temporal" and (
+            not args.appearance_model or len(selected) != 1
+        ):
+            raise ValueError(
+                "resnet-temporal requires --appearance-model and exactly one --runs selection matching that ResNet."
+            )
         args.validation = plan.get("validation")
+        if args.deepethogram_variant == "auto" and not args.validation:
+            raise ValueError(
+                "Automatic stage selection requires independent validation wells."
+            )
         if not args.validation and not args.allow_no_validation:
             raise ValueError(
                 "This plan has no independent validation wells. Create a NEW plan with `model_suite.py plan --source-plan ORIGINAL_PLAN --validation-fraction 0.2 ...`. Use --allow-no-validation only for an explicitly unvalidated legacy run or software smoke test."
@@ -332,13 +400,42 @@ def main(argv=None):
                     args.cache_workers,
                 )
                 data.rgb.cache_clear()
+            args.training_sampling = {}
+            if args.thin_static:
+                sampled = [
+                    thin_targets(
+                        data,
+                        run,
+                        args.image_size,
+                        args.motion_delta,
+                        args.motion_pixels,
+                        args.static_keep_every,
+                        args.transition_radius,
+                    )
+                    for run in selected
+                ]
+                args.training_sampling = {run["id"]: report for run, report in sampled}
+                selected = [run for run, _ in sampled]
+                (out / "training-sampling.json").write_text(
+                    json.dumps(args.training_sampling, indent=2)
+                )
+                progress.emit(
+                    "targets_thinned",
+                    force=True,
+                    runs={
+                        k: {f: v[f] for f in ("original_targets", "retained_targets")}
+                        for k, v in args.training_sampling.items()
+                    },
+                )
             paths = []
             for kind in args.architectures:
                 for run in selected:
                     paths.append(
                         train_model(kind, data, run, out / kind / run["id"], args)
                     )
-        finish_evaluation(paths, tests, out, args.device, progress)
+        finish_evaluation(
+            paths, tests, out, args.device, progress, args.stop_after_awake
+        )
         progress.emit("complete", force=True, output=str(out), models=len(paths))
     except BaseException as error:
         progress.emit(

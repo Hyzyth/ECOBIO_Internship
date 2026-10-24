@@ -9,6 +9,9 @@ from flask import Flask, jsonify, render_template, request, send_file
 from flyscope.imaging.detection import detect_wells
 from flyscope.imaging.alignment import align_wells
 from flyscope.models.registry import available_models, analyze
+import base64
+import json
+import numpy as np
 
 app = Flask(
     __name__,
@@ -100,6 +103,75 @@ def predict():
             )
         )
     except (ValueError, RuntimeError) as exc:
+        return jsonify(error=str(exc)), 400
+
+
+@app.post("/api/input-preview")
+def input_preview():
+    from flyscope.imaging.geometry import parse_wells
+    from flyscope.models.runtime import crop_rgb, pose_input
+    from flyscope.imaging.foreground import MASKED, ISOLATED, isolate
+    from flyscope.models.keras import crop_well, preprocess
+    from flyscope.models.registry import ADAPTERS
+
+    try:
+        upload = request.files.get("image")
+        if not upload:
+            raise ValueError("Select an image first.")
+        image = cv2.imdecode(np.frombuffer(upload.read(), np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError("Unreadable image.")
+        wells = parse_wells(request.form.get("wells", "[]"))
+        if len(wells) != 1:
+            raise ValueError("Select exactly one well.")
+        mode = request.form.get("mode", "model")
+        if mode not in ("model", "fly"):
+            raise ValueError("Unsupported preview mode.")
+        adapter = ADAPTERS.get(request.form.get("model"))
+        meta = adapter.metadata if adapter else {}
+        size = (
+            int(meta.get("image_size", 128))
+            if mode == "model"
+            else int(request.form.get("size", 128))
+        )
+        if not 32 <= size <= 1024:
+            raise ValueError("Preview size must be between 32 and 1024.")
+        points = wells[0]["points"]
+        preprocessing = ISOLATED if mode == "fly" else meta.get("preprocessing", MASKED)
+        crop, mask = crop_well(image, points)
+        status = "well_mask"
+        if preprocessing.startswith("legacy-"):
+            rgb = np.repeat((preprocess(crop, mask) * 255).astype(np.uint8), 3, axis=2)
+            size, status = 200, "legacy_contrast_otsu"
+        else:
+            rgb, _ = crop_rgb(image, points, size, preprocessing)
+            if preprocessing == ISOLATED:
+                _, status = isolate(crop, mask)
+            if mode == "model" and meta.get("architecture") == "sleap-rf":
+                pose_meta = json.loads(
+                    (adapter.path.parent / "pose/pose.json").read_text()
+                )
+                size = pose_meta["configuration"]["size"]
+                rgb = cv2.resize(pose_input(rgb), (size, size))
+                status += "_pose_centered"
+
+        def png(rgb):
+            return (
+                "data:image/png;base64,"
+                + base64.b64encode(
+                    cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))[1]
+                ).decode()
+            )
+
+        before, _ = crop_rgb(image, points, size)
+        return jsonify(
+            image=png(rgb),
+            original=png(before),
+            size=size,
+            preprocessing=preprocessing,
+            foreground_status=status,
+        )
+    except (ValueError, TypeError) as exc:
         return jsonify(error=str(exc)), 400
 
 

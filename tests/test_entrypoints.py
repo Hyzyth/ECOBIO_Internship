@@ -22,6 +22,7 @@ class EntrypointTests(unittest.TestCase):
                 ("plot_training.py", ["--help"]),
                 ("pose_labels.py", ["--help"]),
                 ("rescore_results.py", ["--help"]),
+                ("inspect_model.py", ["--help"]),
             ]:
                 result = subprocess.run(
                     [sys.executable, str(ROOT / "tools" / command), *arguments],

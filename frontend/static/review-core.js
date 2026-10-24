@@ -196,6 +196,37 @@
           : null,
     };
   }
+  function prepareInference(project, index, session, stopAfterAwake = true) {
+    return project.wells.filter((well) => {
+      if (!activeWell(well, index)) return false;
+      const previous = project.records[key(index - 1, well.uid)];
+      if (
+        !stopAfterAwake ||
+        project.mode !== "sequence" ||
+        previous?.analysis_session !== session ||
+        previous.recovery_decision?.confirmed_frame_index == null
+      )
+        return true;
+      const k = key(index, well.uid);
+      project.records[k] = {
+        correction: project.records[k]?.correction,
+        model: previous.model,
+        analysis_session: session,
+        prediction: "awake",
+        raw_prediction: "unknown",
+        raw_confidence: null,
+        confidence: null,
+        state_probabilities: null,
+        decision_eligible: false,
+        inference_skipped: "confirmed_awake",
+        recovery_decision: {
+          ...previous.recovery_decision,
+          carried_forward: true,
+        },
+      };
+      return false;
+    });
+  }
   // Unsure is an abstention, not a biological target. Once awake is confirmed,
   // sequence decisions stay awake; raw model outputs remain available separately.
   function applyRecoveryPolicy(project, options = {}) {
@@ -455,6 +486,7 @@
           analysis_session: record.analysis_session || null,
           raw_confidence: record.raw_confidence ?? record.confidence ?? null,
           recovery_decision: record.recovery_decision || null,
+          inference_skipped: record.inference_skipped || null,
           temporal_inference: record.temporal_inference || null,
           species:
             well.occupancy === "empty"
@@ -1510,6 +1542,7 @@
     analysisIndices,
     frameTiming,
     applyRecoveryPolicy,
+    prepareInference,
     imageArea,
     recoveryMetrics,
     humanReport,

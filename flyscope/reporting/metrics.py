@@ -9,7 +9,13 @@ LABELS = ["coma", "awake", "empty"]
 
 
 def classification(rows, field="prediction"):
-    scored = [r for r in rows if r.get("scored") and r.get("ground_truth") in LABELS]
+    scored = [
+        r
+        for r in rows
+        if r.get("scored")
+        and r.get("ground_truth") in LABELS
+        and not (field == "raw_prediction" and r.get("inference_skipped"))
+    ]
     confusion = {
         label: {p: 0 for p in LABELS + ["unsure", "unknown"]} for label in LABELS
     }
@@ -81,11 +87,11 @@ def first_recovery(rows, truth=False):
     }
 
 
-def metrics(rows, manifest, tolerances=(1, 5, 10, 30, 60)):
+def metrics(rows, manifest, tolerances=(1, 5, 7, 8, 10, 30, 60)):
     overall = classification(rows)
     raw = classification(rows, "raw_prediction")
     truth_support = {
-        label: values["support"] for label, values in raw["classes"].items()
+        label: values["support"] for label, values in overall["classes"].items()
     }
     total_truth = sum(truth_support.values())
     first = {}
@@ -95,8 +101,15 @@ def metrics(rows, manifest, tolerances=(1, 5, 10, 30, 60)):
             or row["frame_index"] < first[row["well_id"]]["frame_index"]
         ):
             first[row["well_id"]] = row
-    scored = [r for r in rows if r.get("scored")]
+    scored = [
+        r
+        for r in rows
+        if r.get("scored")
+        and r.get("state_probabilities") is not None
+        and not r.get("inference_skipped")
+    ]
     calibration = {"brier": None, "ece": None, "bins": [], "auc": {}}
+    calibration["scored_predictions"] = len(scored)
     if scored:
         probabilities = np.array(
             [[r["state_probabilities"].get(k, 0) for k in LABELS] for r in scored]
@@ -189,6 +202,7 @@ def metrics(rows, manifest, tolerances=(1, 5, 10, 30, 60)):
             "Only eligible human annotations are scored. Unannotated wells are never negatives.",
             "Decision accuracy includes abstentions as incorrect; coverage and accuracy_when_decided expose that tradeoff.",
             "Raw metrics score original frame probabilities before confidence/streak/irreversibility rules.",
+            "With inference stopping, skipped rows have no raw probabilities and are excluded from raw/calibration metrics; those selective metrics are not comparable to a full-frame run.",
             "CCRT errors use human recovery bounds. Missing estimates fail tolerance success; prediction Unsure gaps do not exclude an onset.",
             "Confidence thresholds and streak lengths are fixed before held-out evaluation; no test calibration or tuning occurs.",
         ],
@@ -232,6 +246,12 @@ def write_comparison(results, out):
                 "recovery_median_error_frames": metrics["recovery"].get(
                     "median_absolute_error_frames"
                 ),
+                "recovery_max_error_frames": metrics["recovery"].get(
+                    "max_absolute_error_frames"
+                ),
+                "individual_timing_target_passed": metrics["recovery"]
+                .get("individual_timing_target", {})
+                .get("passed"),
                 "early_recoveries": metrics["recovery"].get("early_recoveries"),
                 **{
                     f"ccrt_within_{t}_frames": v["fraction"]

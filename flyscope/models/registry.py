@@ -5,6 +5,7 @@ There are no fake model predictions in manual-review mode.
 """
 
 import math
+import time
 import importlib.util
 from flyscope.imaging.geometry import parse_wells
 from flyscope.models.keras import registered_adapters
@@ -81,6 +82,7 @@ def analyze(model_id, content, wells_json, sequence_session=None, frame=None):
         not isinstance(sequence_session, str) or len(sequence_session) > 200
     ):
         raise ValueError("Invalid sequence session.")
+    started = time.perf_counter()
     records = (
         adapter.predict_sequence(content, wells, sequence_session, frame)
         if hasattr(adapter, "predict_sequence")
@@ -123,4 +125,11 @@ def analyze(model_id, content, wells_json, sequence_session=None, frame=None):
             raise RuntimeError(
                 "Adapter egg count must be null or a nonnegative integer."
             )
-    return {"model": dict(adapter.metadata, id=model_id), "records": records}
+    return {
+        "model": dict(adapter.metadata, id=model_id),
+        "records": records,
+        "timing": {
+            **getattr(adapter, "last_timing", {}),
+            "adapter_s": time.perf_counter() - started,
+        },
+    }

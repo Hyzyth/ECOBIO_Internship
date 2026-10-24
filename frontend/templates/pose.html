@@ -103,6 +103,11 @@
           ><button id="poseNext" disabled>Next →</button>
         </div>
         <p id="poseCaption"></p>
+        <div class="pose-actions">
+          <label>Dot radius (screen pixels)<input id="poseDotSize" type="range" min="1" max="6" value="2" /></label>
+          <label><input id="poseLines" type="checkbox" checked /> Connect visible points</label>
+          <label><input id="poseNumbers" type="checkbox" /> Show point numbers</label>
+        </div>
         <canvas
           id="poseCanvas"
           width="512"

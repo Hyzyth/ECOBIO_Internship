@@ -2,7 +2,10 @@
 
 import unittest
 from flyscope.reporting.metrics import first_recovery
-from flyscope.reporting.recovery_metrics import recovery_metrics
+from flyscope.reporting.recovery_metrics import (
+    recovery_metrics,
+    individual_timing_target,
+)
 from flyscope.data.format import hydrate_manifest
 
 
@@ -35,6 +38,16 @@ def score(data):
 
 
 class RecoveryTiming(unittest.TestCase):
+    def test_individual_target_is_not_an_average_and_misses_fail(self):
+        self.assertTrue(individual_timing_target([5] * 19 + [8])["passed"])
+        self.assertFalse(individual_timing_target([0] * 19 + [9])["passed"])
+        self.assertFalse(individual_timing_target([0] * 19 + [None])["passed"])
+        self.assertFalse(individual_timing_target([5] * 18 + [6, 8])["passed"])
+        self.assertTrue(individual_timing_target([-5] * 19 + [-8])["passed"])
+        target = individual_timing_target([0] * 60)
+        self.assertEqual(target["required_within_5"], 57)
+        self.assertIsNone(individual_timing_target([])["passed"])
+
     def test_model_uncertainty_never_filters_bad_onset_and_misses_count(self):
         data = rows(
             ["coma"] * 2 + ["awake"] * 3, ["coma", "unsure", "unsure", "awake", "awake"]
@@ -43,6 +56,9 @@ class RecoveryTiming(unittest.TestCase):
         m = score(data)
         self.assertEqual(m["paired_observed_wells"], 1)
         self.assertEqual(m["mae_frames"], 1)
+        self.assertEqual(m["max_absolute_error_frames"], 1)
+        self.assertFalse(m["all_exact_events_detected"])
+        self.assertEqual(m["within_tolerance"]["8"]["fraction"], 0.5)
         self.assertEqual(
             m["within_tolerance"]["1"], dict(hits=1, total=2, fraction=0.5)
         )

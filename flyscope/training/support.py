@@ -158,7 +158,7 @@ class CropCache:
 
     @classmethod
     def prepare(cls, data, runs, size, context, directory, progress, workers=2):
-        from flyscope.models.runtime import PREPROCESSING, crop_rgb
+        from flyscope.models.runtime import crop_rgb
 
         keys = set()
         for identity in {k for run in runs for k in run["annotation_ids"]}:
@@ -175,7 +175,8 @@ class CropCache:
                 data.context_geometry(*key[:3])
                 keys.add(key)
         keys = sorted(keys)
-        signature = {"format": 1, "preprocessing": PREPROCESSING, "keys": keys}
+        preprocessing = data.preprocessing
+        signature = {"format": 1, "preprocessing": preprocessing, "keys": keys}
         token = hashlib.sha256(json.dumps(signature).encode()).hexdigest()
         root = Path(directory).resolve()
         root.mkdir(parents=True, exist_ok=True)
@@ -219,7 +220,10 @@ class CropCache:
                     image = datasets[sha].image(data.image_maps[sha][frame]["path"])
                     for i, well in wells:
                         rgb[i], foreground[i] = crop_rgb(
-                            image, data.geometry[sha][(well, frame)]["points"], size
+                            image,
+                            data.geometry[sha][(well, frame)]["points"],
+                            size,
+                            preprocessing,
                         )
                     return len(wells)
 

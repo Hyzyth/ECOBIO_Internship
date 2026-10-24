@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 from flyscope.reporting.metrics import metrics
-from flyscope.models.runtime import forest_export, forest_probabilities
+from flyscope.models.runtime import forest_export, forest_probabilities, compile_forest
 from flyscope.training.comparison import main
 from flyscope.training.data import TrainingData
 from flyscope.training.plans import checked_plan, plan_for
@@ -90,6 +90,10 @@ class SuiteContracts(unittest.TestCase):
         np.testing.assert_allclose(
             forest_probabilities(artifact, x),
             np.c_[forest.predict_proba(x), np.zeros(len(x))],
+        )
+        np.testing.assert_allclose(
+            forest_probabilities(compile_forest(artifact), x),
+            forest_probabilities(artifact, x),
         )
 
     def test_selection_binding_and_causal_context(self):

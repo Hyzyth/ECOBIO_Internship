@@ -3,6 +3,7 @@
 
 Native SLP keypoints provide anatomical targets, never Coma/Awake labels.
 """
+
 import argparse
 import hashlib
 import json
@@ -209,20 +210,31 @@ def train(args):
                     "The parent pose model already trained on proposed validation frames. Use untouched anatomical labels or retain its original grouped split; otherwise this is not independent validation."
                 )
     config = {"size": args.size, "filters": args.filters, "nodes": nodes}
+    if getattr(data, "edges", None):
+        config["edges"] = data.edges
     model = network(config).to(device)
     if parent:
-        if (
-            parent["configuration"]["nodes"] != nodes
-            or sha(Path(args.parent) / "pose.pt") != parent["weights_sha256"]
-        ):
-            raise ValueError(
-                "Parent pose skeleton or weights hash differs from the provided labels."
-            )
-        model.load_state_dict(
-            torch.load(
-                Path(args.parent) / "pose.pt", map_location=device, weights_only=True
-            )
+        if sha(Path(args.parent) / "pose.pt") != parent["weights_sha256"]:
+            raise ValueError("Parent pose weights hash differs from its metadata.")
+        weights = torch.load(
+            Path(args.parent) / "pose.pt", map_location=device, weights_only=True
         )
+        parent_nodes = parent["configuration"]["nodes"]
+        if parent_nodes != nodes:
+            if not getattr(args, "extend_skeleton", False) or not set(
+                parent_nodes
+            ) < set(nodes):
+                raise ValueError(
+                    "Parent pose skeleton differs. Use --extend-skeleton only to add manually annotated nodes while keeping all parent node names."
+                )
+            # Reuse the backbone and existing confidence maps by NAME. New
+            # joint maps retain their independent initialization.
+            child = model.state_dict()
+            for name in ("head.weight", "head.bias"):
+                for i, node in enumerate(parent_nodes):
+                    child[name][nodes.index(node)].copy_(weights[name][i])
+                weights[name] = child[name]
+        model.load_state_dict(weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
     losses, validation_history = [], []
     best = BestCheckpoint(args.patience, min_delta=1e-8)
@@ -381,6 +393,12 @@ def train(args):
             ),
         }
         meta["parent_weights_sha256"] = parent["weights_sha256"] if parent else None
+        meta["source_crop_preprocessing"] = getattr(
+            data, "source_crop_preprocessing", None
+        )
+        meta["added_nodes"] = [
+            n for n in nodes if parent and n not in parent["configuration"]["nodes"]
+        ]
         (out / "pose.json").write_text(json.dumps(meta, indent=2))
         progress.emit(
             "complete", force=True, output=str(out), selected_epoch=best.epoch
@@ -478,6 +496,11 @@ def main():
     t.add_argument("--output", required=True)
     t.add_argument("--epochs", type=int, default=25)
     t.add_argument("--batch-size", type=int, default=4)
+    t.add_argument(
+        "--extend-skeleton",
+        action="store_true",
+        help="Reuse a parent's existing node maps and initialize added manually annotated nodes",
+    )
     t.add_argument("--size", type=int, default=128)
     t.add_argument("--filters", type=int, default=32)
     t.add_argument("--seed", type=int, default=2026)
